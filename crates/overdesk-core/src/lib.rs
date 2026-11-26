@@ -72,7 +72,9 @@ impl Layout {
             if a.rect.w == 0 || a.rect.h == 0 {
                 return Err(LayoutError::ZeroSize(a.name.clone()));
             }
-            if a.rect.right() > i32::MAX as i64 || a.rect.bottom() > i32::MAX as i64 {
+            // Bounding size and far edges keeps every global and local coordinate within i32.
+            let too_big = a.rect.w > i32::MAX as u32 || a.rect.h > i32::MAX as u32;
+            if too_big || a.rect.right() > i32::MAX as i64 || a.rect.bottom() > i32::MAX as i64 {
                 return Err(LayoutError::OutOfRange(a.name.clone()));
             }
             for b in &screens[..i] {
@@ -112,15 +114,15 @@ pub struct Switcher {
 }
 
 impl Switcher {
-    /// Starts at the center of screen `start`.
-    pub fn new(layout: Layout, start: usize) -> Self {
-        let r = layout.screens[start].rect;
+    /// Starts at the center of screen `start`; `None` if no such screen.
+    pub fn new(layout: Layout, start: usize) -> Option<Self> {
+        let r = layout.screens.get(start)?.rect;
         let pos = (r.x + (r.w / 2) as i32, r.y + (r.h / 2) as i32);
-        Self {
+        Some(Self {
             layout,
             active: start,
             pos,
-        }
+        })
     }
 
     pub fn active(&self) -> usize {

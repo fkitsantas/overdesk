@@ -95,13 +95,16 @@ pub enum FrameError {
 }
 
 /// Encode one message as `u32 big-endian length || postcard payload`.
-pub fn encode(msg: &Message) -> Vec<u8> {
-    // Serializing owned enums of ints/strings into a Vec cannot fail.
-    let payload = postcard::to_stdvec(msg).expect("postcard serialization to Vec is infallible");
+/// Fails with `TooLarge` rather than emit a frame the peer would reject.
+pub fn encode(msg: &Message) -> Result<Vec<u8>, FrameError> {
+    let payload = postcard::to_stdvec(msg).map_err(|e| FrameError::Malformed(e.to_string()))?;
+    if payload.len() > MAX_FRAME_LEN {
+        return Err(FrameError::TooLarge(payload.len()));
+    }
     let mut frame = Vec::with_capacity(LEN_PREFIX + payload.len());
     frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     frame.extend_from_slice(&payload);
-    frame
+    Ok(frame)
 }
 
 /// Decode one frame from the front of `buf`.
@@ -185,11 +188,13 @@ mod tests {
     #[test]
     fn back_to_back_frames_decode_in_order() {
         let mut buf = encode(&Message::Leave).unwrap();
-        buf.extend(encode(&Message::Key {
-            code: 0xE3,
-            pressed: true,
-        })
-        .unwrap());
+        buf.extend(
+            encode(&Message::Key {
+                code: 0xE3,
+                pressed: true,
+            })
+            .unwrap(),
+        );
         let (first, used) = decode(&buf).unwrap().unwrap();
         assert_eq!(first, Message::Leave);
         let (second, _) = decode(&buf[used..]).unwrap().unwrap();
@@ -210,7 +215,9 @@ mod tests {
 
     #[test]
     fn oversized_message_refuses_to_encode() {
-        let msg = Message::Clipboard { text: "x".repeat(2 * MAX_FRAME_LEN) };
+        let msg = Message::Clipboard {
+            text: "x".repeat(2 * MAX_FRAME_LEN),
+        };
         assert!(matches!(encode(&msg), Err(FrameError::TooLarge(_))));
     }
 
