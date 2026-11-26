@@ -56,7 +56,7 @@ simply superseded. Keys travel on a separate reliable lane and never arrive out 
 
 ### 🔐 Private by default
 Every connection is TLS 1.3. To pair, both screens show the same 6-digit code. No
-fingerprint files, no open ports to babysit.
+fingerprint files to copy around.
 
 </td>
 </tr>
