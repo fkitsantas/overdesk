@@ -79,6 +79,8 @@ struct TapCtx {
     chord: RefCell<EscapeChord>,
     /// Whether this tap last detached the cursor from the mouse.
     detached: Cell<bool>,
+    /// Where the cursor is held while swallowing.
+    frozen: Cell<Option<CGPoint>>,
 }
 
 /// While swallowing, the cursor must stay put: swallowed events never reach apps, but
@@ -176,6 +178,7 @@ fn run_tap(tx: Sender<Captured>, swallow: Arc<AtomicBool>, stop: Arc<AtomicBool>
         sub: RefCell::new(Subpixel::default()),
         chord: RefCell::new(EscapeChord::default()),
         detached: Cell::new(false),
+        frozen: Cell::new(None),
     });
     let ctx_ptr = &*ctx as *const TapCtx as *mut c_void;
     let callback: CGEventTapCallBack = Some(tap_callback);
@@ -208,6 +211,10 @@ fn run_tap(tx: Sender<Captured>, swallow: Arc<AtomicBool>, stop: Arc<AtomicBool>
     let mode = unsafe { kCFRunLoopDefaultMode };
     run_loop.add_source(Some(&source), mode);
     CGEvent::tap_enable(&port, true);
+    // Warping otherwise suppresses local mouse input for 0.25 s, making the held
+    // cursor stutter and swallowing deltas we need.
+    #[allow(deprecated)]
+    let _ = objc2_core_graphics::CGSetLocalEventsSuppressionInterval(0.0);
     let _ = ready.send(Ok(()));
 
     // Poll the stop flag between short run-loop slices instead of sharing the
@@ -269,6 +276,22 @@ fn handle(ctx: &TapCtx, ty: CGEventType, ev: &CGEvent, raw: *mut CGEvent) -> *mu
     if ctx.detached.get() != swallowing {
         detach_cursor(swallowing);
         ctx.detached.set(swallowing);
+    }
+    // Detaching only works for a foreground app, and swallowing does not stop the
+    // cursor either: hold it where it left the screen by warping back on every move.
+    let is_move = matches!(
+        ty,
+        CGEventType::MouseMoved
+            | CGEventType::LeftMouseDragged
+            | CGEventType::RightMouseDragged
+            | CGEventType::OtherMouseDragged
+    );
+    if !swallowing {
+        ctx.frozen.set(None);
+    } else if is_move {
+        let at = ctx.frozen.get().unwrap_or_else(|| CGEvent::location(Some(ev)));
+        ctx.frozen.set(Some(at));
+        let _ = objc2_core_graphics::CGWarpMouseCursorPosition(at);
     }
     let deliver = match edge {
         Some((held, down)) => ctx.local.borrow_mut().deliver_locally(held, down, swallowing),
