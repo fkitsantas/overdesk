@@ -3,6 +3,8 @@
 
 use std::collections::BTreeSet;
 
+pub use overdesk_proto::Os;
+
 /// Screen rectangle in the shared logical (DPI-independent) desktop plane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
@@ -176,6 +178,13 @@ impl HeldKeys {
     }
 }
 
+/// Maps a HID key usage typed on a `from` keyboard to the usage the `to` OS should see.
+/// Mac <-> PC swaps Command and Control so Cmd+C on a Mac keyboard copies on Windows,
+/// and Ctrl+C on a PC keyboard copies on the Mac.
+pub fn remap_key(_code: u32, _from: Os, _to: Os) -> u32 {
+    todo!()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,6 +339,37 @@ mod tests {
                 y: 0
             }
         );
+    }
+
+    const L_CTRL: u32 = 0xE0;
+    const L_ALT: u32 = 0xE2;
+    const L_GUI: u32 = 0xE3;
+    const R_CTRL: u32 = 0xE4;
+    const R_GUI: u32 = 0xE7;
+    const KEY_C: u32 = 0x06;
+
+    #[test]
+    fn mac_to_pc_swaps_command_and_control() {
+        for to in [Os::Windows, Os::Linux] {
+            assert_eq!(remap_key(L_GUI, Os::MacOs, to), L_CTRL);
+            assert_eq!(remap_key(L_CTRL, Os::MacOs, to), L_GUI);
+            assert_eq!(remap_key(R_GUI, Os::MacOs, to), R_CTRL);
+            assert_eq!(remap_key(R_CTRL, Os::MacOs, to), R_GUI);
+        }
+    }
+
+    #[test]
+    fn pc_to_mac_swaps_control_and_command() {
+        assert_eq!(remap_key(L_CTRL, Os::Windows, Os::MacOs), L_GUI);
+        assert_eq!(remap_key(L_GUI, Os::Windows, Os::MacOs), L_CTRL);
+    }
+
+    #[test]
+    fn same_family_and_other_keys_pass_through() {
+        assert_eq!(remap_key(L_GUI, Os::MacOs, Os::MacOs), L_GUI);
+        assert_eq!(remap_key(L_CTRL, Os::Windows, Os::Linux), L_CTRL);
+        assert_eq!(remap_key(L_ALT, Os::MacOs, Os::Windows), L_ALT);
+        assert_eq!(remap_key(KEY_C, Os::MacOs, Os::Windows), KEY_C);
     }
 
     #[test]

@@ -79,6 +79,9 @@ dependencies = [
 [[package]]
 name = "overdesk-core"
 version = "0.1.0"
+dependencies = [
+ "overdesk-proto",
+]
 
 [[package]]
 name = "overdesk-proto"
