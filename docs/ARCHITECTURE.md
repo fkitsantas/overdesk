@@ -43,8 +43,17 @@ message.
 Layout, peers and settings live on **every** peer as one versioned document:
 
 - Any device's UI can edit it. The edit bumps the version and broadcasts on the control lane.
-- Peers keep the highest version; ties are broken by `PeerId`.
+- Peers keep the highest `(version, author)`.
 - There is no master configuration file.
+
+A received document is adopted only if:
+- its `author` is the authenticated peer that sent it;
+- its version moves forward by at most 2²⁰ (honest peers bump it by 1 per edit);
+- it has at most 64 screens;
+- every screen belongs to a peer this device has paired with;
+- the layout itself is valid, with no overlaps and no zero sizes.
+
+The document carries layout only, never trust.
 
 ## 4. Semantic input model
 
@@ -112,8 +121,9 @@ Trust is strictly pairwise: replicated Desk state can never add a trusted key.
 | Wire types: control and motion lanes, `PeerId`, focus, gestures | ✅ |
 | Wrap-safe sequence filter for motion | ✅ |
 | `Switcher`, held keys, ⌘↔Ctrl remap | ✅ |
-| Replicated Desk state | 🔜 |
+| Replicated Desk state (merge and validation) | ✅ |
 | Lazy clipboard (the wire has plain text for now) | 🔜 |
 | Pairing exchange (commit-reveal, 6-digit code) | ✅ |
-| QUIC lanes | 🔜 |
+| QUIC lanes: mutual TLS 1.3, control stream, motion datagrams | ✅ |
+| LAN discovery (mDNS), saving device keys to disk, daemon | 🔜 |
 | Platform adapters | 🔜 |

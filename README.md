@@ -87,7 +87,8 @@ costs nothing until you use it.
 | 0 | Workspace, CI on macOS / Windows / Linux, license checks, CLA | ✅ Done |
 | 1 | Two-lane wire protocol and core logic: screen layout, edge switching, held keys, ⌘↔Ctrl remap | ✅ Done |
 | 2 | **macOS** capture and injection with native Magic Mouse / trackpad / keyboard feel | ✅ Built and hand-tested ([evidence](docs/tdd/macos-adapter.tdd.md)) |
-| 3 | Replicated Desk state, QUIC lanes, 6-digit pairing, LAN discovery, latency benchmark | ⏳ Next |
+| 3 | QUIC lanes, 6-digit pairing, replicated Desk state, latency benchmark | ✅ Built and tested over loopback |
+| 3b | LAN discovery, saving device keys to disk, daemon that wires it all together | ⏳ Next |
 | 4 | **Windows** capture and injection | 🔜 |
 | 5 | Desktop app: Tauri 2 + Svelte 5, drag-to-arrange screens, tray icon | 🔜 |
 | 6 | Linux (X11, then Wayland through libei) | 🔜 |
@@ -108,6 +109,7 @@ flowchart LR
 |---|---|
 | [`overdesk-proto`](crates/overdesk-proto) | Wire types for both lanes, length-prefixed control frames (1 MiB cap), wrap-safe motion sequencing |
 | [`overdesk-core`](crates/overdesk-core) | Pure logic: layout validation, cursor focus across screen edges, held-key release, ⌘↔Ctrl remap |
+| [`overdesk-net`](crates/overdesk-net) | QUIC transport: mutual TLS 1.3 with device certificates, control stream and motion datagrams, 6-digit commit-reveal pairing, `Hello` identity checks |
 | [`overdesk-platform`](crates/overdesk-platform) | OS adapters. macOS: Quartz event tap and injection with real modifier flags, drag events, double-click counts and scroll momentum phases |
 
 Read the full design in **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
@@ -128,6 +130,13 @@ On a Mac, try the input probe. First grant your terminal **Input Monitoring** an
 ```bash
 cargo run -p overdesk-platform --example mac_probe -- listen   # prints your input for 10 s
 cargo run -p overdesk-platform --example mac_probe -- inject   # draws a small square with the cursor
+```
+
+Measure motion-lane latency over loopback QUIC:
+
+```bash
+cargo run --release -p overdesk-net --example latency
+# motion round trip over loopback, 2000 samples: p50 256µs  p99 804µs  lost 0   (M-series Mac)
 ```
 
 ## Contributing
