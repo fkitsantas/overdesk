@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-use overdesk_proto::{Button, Control, Desk, Motion, Os, PeerId, Phase, ScrollUnit, SeqGate};
+use overdesk_proto::{Button, Control, Desk, Gesture, Motion, Os, PeerId, Phase, ScrollUnit, SeqGate};
 
 use crate::{HeldKeys, Motion as Move, Switcher, desk_layout, remap_key};
 
@@ -58,6 +58,13 @@ pub enum Event {
         /// Unit of `dx` and `dy`.
         unit: ScrollUnit,
         /// Position of this event within a continuous scroll.
+        phase: Phase,
+    },
+    /// A trackpad gesture from this device's own hardware.
+    LocalGesture {
+        /// The gesture and its delta.
+        gesture: Gesture,
+        /// Position of this event within the gesture.
         phase: Phase,
     },
     /// The failsafe chord: input is already back locally; tidy up the rest.
@@ -129,6 +136,13 @@ pub enum Action {
         /// Unit of `dx` and `dy`.
         unit: ScrollUnit,
         /// Position of this event within a continuous scroll.
+        phase: Phase,
+    },
+    /// Inject a trackpad gesture.
+    InjectGesture {
+        /// The gesture and its delta.
+        gesture: Gesture,
+        /// Position of this event within the gesture.
         phase: Phase,
     },
     /// Release every key and button injected on this device.
@@ -400,6 +414,12 @@ impl Engine {
                     msg: Control::Scroll { dx, dy, unit, phase },
                 });
             }
+            Event::LocalGesture { gesture, phase } => {
+                out.push(Action::Send {
+                    to: peer,
+                    msg: Control::Gesture { gesture, phase },
+                });
+            }
             Event::Escape => {
                 self.leave_driving(peer, &mut out);
                 // Mid-screen, not wherever the hidden cursor drifted: next to the edge a
@@ -472,6 +492,7 @@ impl Engine {
                     vec![Action::InjectMove { x, y }, Action::InjectButton { button, pressed }]
                 }
                 Control::Scroll { dx, dy, unit, phase } => vec![Action::InjectScroll { dx, dy, unit, phase }],
+                Control::Gesture { gesture, phase } => vec![Action::InjectGesture { gesture, phase }],
                 _ => vec![],
             },
             Event::PeerMotion { from, motion } if from == driver && self.gate.accept(motion.seq) => {
@@ -954,5 +975,52 @@ mod tests {
         let mut e = driven(0);
         assert_eq!(e.handle(Event::PeerLost(MAC), 5), vec![Action::ReleaseAll]);
         assert_eq!(e.mode(), Mode::Local);
+    }
+
+    #[test]
+    fn gestures_are_sent_when_driving_and_injected_when_driven() {
+        let g = Gesture::Magnify { milli: 40 };
+        let sent = driving().handle(
+            Event::LocalGesture {
+                gesture: g,
+                phase: Phase::Changed,
+            },
+            1,
+        );
+        assert_eq!(
+            sent,
+            vec![Action::Send {
+                to: PC,
+                msg: Control::Gesture {
+                    gesture: g,
+                    phase: Phase::Changed
+                }
+            }]
+        );
+        let got = driven(0).handle(
+            Event::Peer {
+                from: MAC,
+                msg: Control::Gesture {
+                    gesture: g,
+                    phase: Phase::Began,
+                },
+            },
+            1,
+        );
+        assert_eq!(
+            got,
+            vec![Action::InjectGesture {
+                gesture: g,
+                phase: Phase::Began
+            }]
+        );
+        let local = engine(MAC).handle(
+            Event::LocalGesture {
+                gesture: g,
+                phase: Phase::Changed,
+            },
+            1,
+        );
+        assert!(local.is_empty(), "a local gesture stays on this device");
     }
 }

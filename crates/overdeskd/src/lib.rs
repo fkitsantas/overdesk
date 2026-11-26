@@ -331,6 +331,10 @@ pub async fn run(
         }),
         tokio::spawn(async move {
             while let Some(c) = local.recv().await {
+                // Trackpad gestures are Pro-only: Free never forwards them.
+                if matches!(c, Captured::Gesture { .. }) {
+                    continue;
+                }
                 if local_ev.send(to_event(c)).is_err() {
                     break;
                 }
@@ -446,6 +450,7 @@ pub fn to_event(c: Captured) -> Event {
         Captured::Button { button, pressed } => Event::LocalButton { button, pressed },
         Captured::Key { code, pressed } => Event::LocalKey { code, pressed },
         Captured::Scroll { dx, dy, unit, phase } => Event::LocalScroll { dx, dy, unit, phase },
+        Captured::Gesture { gesture, phase } => Event::LocalGesture { gesture, phase },
         Captured::Escape => Event::Escape,
     }
 }

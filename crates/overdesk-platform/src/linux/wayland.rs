@@ -28,7 +28,7 @@ use ashpd::desktop::input_capture::{
 };
 use ashpd::desktop::remote_desktop::{Axis, DeviceType, KeyState, RemoteDesktop, SelectDevicesOptions};
 use futures_util::StreamExt;
-use overdesk_proto::{Button, Phase, ScrollUnit};
+use overdesk_proto::{Button, Gesture, Phase, ScrollUnit};
 use reis::ei;
 use reis::event::{DeviceCapability, EiEvent};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -37,10 +37,10 @@ use super::events::Notches;
 use super::ffi::LinuxError;
 use super::keymap::code_to_keycode;
 use super::wayland_core::{
-    Input, Machine, Out, Pointer, ScrollOut, Zone, desk_bounds, evdev_from_button, plan_barriers, portal_unavailable,
-    scroll_out, store_dir,
+    Input, MAX_STEPS, Machine, Out, Pointer, ScrollOut, Zone, desk_bounds, evdev_from_button, plan_barriers,
+    portal_unavailable, scroll_out, store_dir,
 };
-use crate::input::Captured;
+use crate::input::{CTRL_KEY, Captured, pinch_wheel};
 
 /// The id Overdesk registers with the portal as an unsandboxed app (basename of its
 /// `.desktop` file); see `docs/WAYLAND.md`.
@@ -447,6 +447,8 @@ pub struct Injector {
     buttons: Vec<Button>,
     /// Carries the fraction of discrete wheel steps between events.
     scroll: Notches,
+    /// Carries the fraction of a Ctrl+wheel step between pinch events.
+    pinch: Notches,
 }
 
 impl Injector {
@@ -478,6 +480,7 @@ impl Injector {
             keys: Vec::new(),
             buttons: Vec::new(),
             scroll: Notches::default(),
+            pinch: Notches::default(),
         })
     }
 
@@ -526,6 +529,25 @@ impl Injector {
                 ScrollOut::Smooth(x, y) => Msg::Smooth(x, y),
                 ScrollOut::Steps { horizontal, steps } => Msg::Steps(horizontal, steps),
             });
+        }
+    }
+
+    /// Replays a pinch as Ctrl+wheel steps (the zoom shortcut of browsers and editors);
+    /// rotate and smart zoom have no public portal equivalent and are ignored.
+    pub fn gesture(&mut self, gesture: Gesture, _phase: Phase) {
+        let Some(wheel) = pinch_wheel(gesture) else { return };
+        let (_, steps) = self.pinch.feed(0, wheel, ScrollUnit::Notch120);
+        if steps == 0 {
+            return;
+        }
+        let held = self.keys.contains(&CTRL_KEY);
+        if !held {
+            self.key(CTRL_KEY, true);
+        }
+        // The portal's discrete axis is positive down; pinch-out (positive) is wheel up.
+        let _ = self.tx.send(Msg::Steps(false, (-steps).clamp(-MAX_STEPS, MAX_STEPS)));
+        if !held {
+            self.key(CTRL_KEY, false);
         }
     }
 

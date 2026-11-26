@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
-use overdesk_proto::{Button, Phase, ScrollUnit};
+use overdesk_proto::{Button, Gesture, Phase, ScrollUnit};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
@@ -38,7 +38,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use super::events::{absolute, wheel_units};
 use super::keymap::{code_to_scan, scan_to_code};
 pub use crate::input::Captured;
-use crate::input::{EscapeChord, Rect, to_local};
+use crate::input::{CTRL_KEY, EscapeChord, Rect, pinch_wheel, to_local};
 use crate::mac::events::{Held, LocalDowns};
 
 /// Put in `dwExtraInfo` of everything we inject, so our own hooks skip it. Every peer
@@ -601,6 +601,21 @@ impl Injector {
             inputs.push(mouse_input(0, 0, wheel_units(dx, unit) as u32, MOUSEEVENTF_HWHEEL));
         }
         send_inputs(&inputs);
+    }
+
+    /// Replays a pinch as Ctrl+mouse wheel, the zoom shortcut of browsers, editors and
+    /// Office. Rotate and smart zoom have no public Windows equivalent and are ignored.
+    pub fn gesture(&mut self, gesture: Gesture, phase: Phase) {
+        let Some(wheel) = pinch_wheel(gesture) else { return };
+        // Ctrl stays held only for this wheel, unless the remote user already holds it.
+        let held = self.keys.contains(&CTRL_KEY);
+        if !held {
+            self.key(CTRL_KEY, true);
+        }
+        self.scroll(0, wheel, ScrollUnit::Notch120, phase);
+        if !held {
+            self.key(CTRL_KEY, false);
+        }
     }
 
     /// Releases every key and button this injector holds down.

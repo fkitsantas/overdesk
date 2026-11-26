@@ -10,7 +10,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 
-use overdesk_proto::{Button, Phase, ScrollUnit};
+use overdesk_proto::{Button, Gesture, Phase, ScrollUnit};
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xfixes::ConnectionExt as _;
@@ -26,8 +26,8 @@ use x11rb::{CURRENT_TIME, NONE};
 use super::events::{Notches, button_from_x, wheel_from_x, x_button};
 use super::ffi::LinuxError;
 use super::keymap::{code_to_keycode, keycode_to_code};
-use crate::input::Captured;
 use crate::input::EscapeChord;
+use crate::input::{CTRL_KEY, Captured, pinch_wheel};
 use crate::mac::events::Subpixel;
 
 /// Most wheel clicks one scroll event may inject, so a runaway remote delta cannot flood
@@ -442,6 +442,8 @@ pub struct Injector {
     buttons: Vec<Button>,
     /// Turns Mac trackpad pixels into wheel clicks.
     scroll: Notches,
+    /// Carries the fraction of a Ctrl+wheel click between pinch events.
+    pinch: Notches,
 }
 
 /// If the injector ends mid-session, keys and buttons it pressed through XTest would stay
@@ -463,6 +465,7 @@ impl Injector {
             keys: Vec::new(),
             buttons: Vec::new(),
             scroll: Notches::default(),
+            pinch: Notches::default(),
         })
     }
 
@@ -542,6 +545,29 @@ impl Injector {
                 self.click(n, true);
                 self.click(n, false);
             }
+        }
+    }
+
+    /// Replays a pinch as Ctrl+wheel clicks (the zoom shortcut of browsers and editors);
+    /// rotate and smart zoom have no public X11 equivalent and are ignored.
+    pub fn gesture(&mut self, gesture: Gesture, _phase: Phase) {
+        let Some(wheel) = pinch_wheel(gesture) else { return };
+        let (_, clicks) = self.pinch.feed(0, wheel, ScrollUnit::Notch120);
+        if clicks == 0 {
+            return;
+        }
+        // Ctrl stays held only for these clicks, unless the remote user already holds it.
+        let held = self.keys.contains(&CTRL_KEY);
+        if !held {
+            self.key(CTRL_KEY, true);
+        }
+        let n = if clicks > 0 { 4 } else { 5 };
+        for _ in 0..clicks.abs().min(MAX_CLICKS) {
+            self.click(n, true);
+            self.click(n, false);
+        }
+        if !held {
+            self.key(CTRL_KEY, false);
         }
     }
 

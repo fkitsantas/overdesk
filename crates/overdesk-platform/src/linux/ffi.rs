@@ -4,7 +4,7 @@
 
 use std::sync::mpsc::Receiver;
 
-use overdesk_proto::{Button, Phase, ScrollUnit};
+use overdesk_proto::{Button, Gesture, Phase, ScrollUnit};
 
 use super::wayland_core::{SessionKind, session_kind};
 use super::{wayland, x11};
@@ -147,6 +147,14 @@ impl Injector {
         match self {
             Self::X11(i) => i.scroll(dx, dy, unit, phase),
             Self::Wayland(i) => i.scroll(dx, dy, unit, phase),
+        }
+    }
+
+    /// Replays a trackpad gesture where Linux has a public equivalent (pinch as Ctrl+wheel).
+    pub fn gesture(&mut self, gesture: Gesture, phase: Phase) {
+        match self {
+            Self::X11(i) => i.gesture(gesture, phase),
+            Self::Wayland(i) => i.gesture(gesture, phase),
         }
     }
 

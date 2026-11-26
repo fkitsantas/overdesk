@@ -74,6 +74,7 @@ impl NativePlatform {
                             injector.key(code, pressed);
                         }
                         Action::InjectScroll { dx, dy, unit, phase } => injector.scroll(dx, dy, unit, phase),
+                        Action::InjectGesture { gesture, phase } => injector.gesture(gesture, phase),
                         Action::ReleaseAll => injector.release_all(),
                         _ => {}
                     }

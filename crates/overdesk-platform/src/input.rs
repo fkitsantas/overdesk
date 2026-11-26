@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use overdesk_proto::{Button, Phase, ScrollUnit};
+use overdesk_proto::{Button, Gesture, Phase, ScrollUnit};
 
 /// A monitor or desktop rectangle in OS global pixels: `(x, y, width, height)`.
 pub type Rect = (i32, i32, u32, u32);
@@ -83,8 +83,31 @@ pub enum Captured {
         /// Gesture or momentum phase, so the receiver can reproduce inertial scrolling.
         phase: Phase,
     },
+    /// A trackpad gesture (Mac only). The open daemon drops it; Pro forwards it.
+    Gesture {
+        /// The gesture and its delta.
+        gesture: Gesture,
+        /// Position of this event within the gesture.
+        phase: Phase,
+    },
     /// The user pressed the escape chord: local input is back, whatever the engine thinks.
     Escape,
+}
+
+/// Overdesk code of the left Control key (HID usage), held while a pinch is replayed as a wheel.
+pub const CTRL_KEY: u32 = 0xE0;
+
+/// Wheel units (1/120 notch) per thousandth of pinch scale, as a fraction: one notch per
+/// 100 milli (10%), about one zoom step of a browser or editor per Ctrl+wheel notch.
+const WHEEL_PER_MILLI: (i32, i32) = (120, 100);
+
+/// Vertical wheel units that replay `gesture` as Ctrl+wheel on a PC: pinch out zooms in
+/// (wheel up). `None` for gestures with no public PC equivalent (rotate, smart zoom).
+pub fn pinch_wheel(gesture: Gesture) -> Option<i32> {
+    match gesture {
+        Gesture::Magnify { milli } => Some(milli.saturating_mul(WHEEL_PER_MILLI.0) / WHEEL_PER_MILLI.1),
+        Gesture::Rotate { .. } | Gesture::SmartZoom => None,
+    }
 }
 
 /// Control+Option/Alt+Command/Win+Escape, left or right modifiers. Detected in the
@@ -196,5 +219,13 @@ mod tests {
         assert_eq!(to_local(-1280, -1280), 0);
         assert_eq!(to_global(0, -1280), -1280);
         assert_eq!(to_global(to_local(1919, -1280), -1280), 1919);
+    }
+
+    #[test]
+    fn pinch_maps_to_wheel_and_other_gestures_do_not() {
+        assert_eq!(pinch_wheel(Gesture::Magnify { milli: 100 }), Some(120));
+        assert_eq!(pinch_wheel(Gesture::Magnify { milli: -50 }), Some(-60));
+        assert_eq!(pinch_wheel(Gesture::Rotate { millideg: 5000 }), None);
+        assert_eq!(pinch_wheel(Gesture::SmartZoom), None);
     }
 }

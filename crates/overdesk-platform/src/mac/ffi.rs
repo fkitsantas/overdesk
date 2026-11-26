@@ -13,6 +13,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
+use objc2_app_kit::{NSEvent, NSEventPhase, NSEventType};
 use objc2_core_foundation::{
     CFMachPort, CFRetained, CFRunLoop, CFString, CFType, CGPoint, kCFBooleanTrue, kCFRunLoopDefaultMode,
 };
@@ -21,7 +22,7 @@ use objc2_core_graphics::{
     CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy, CGEventType, CGMouseButton, CGPreflightListenEventAccess,
     CGPreflightPostEventAccess, CGRequestListenEventAccess, CGRequestPostEventAccess, CGScrollEventUnit,
 };
-use overdesk_proto::{Button, Phase, ScrollUnit};
+use overdesk_proto::{Button, Gesture, Phase, ScrollUnit};
 
 use super::events::{
     ClickCounter, Held, LocalDowns, ModChange, MoveKind, Subpixel, flags_for, modifier_change, move_kind,
@@ -241,6 +242,11 @@ fn run_tap(tx: Sender<Captured>, swallow: Arc<AtomicBool>, stop: Arc<AtomicBool>
         CGEventType::OtherMouseDown,
         CGEventType::OtherMouseUp,
         CGEventType::OtherMouseDragged,
+        // NSEventType rotate (18), magnify (30), smartMagnify (32): public AppKit
+        // numbers, which Quartz uses as event types; the tap mask is just a bit per type.
+        CGEventType(18),
+        CGEventType(30),
+        CGEventType(32),
     ]
     .iter()
     // CGEventMask: bit n set means "deliver events of type n" (CGEventMaskBit).
@@ -489,8 +495,44 @@ fn translate(ty: CGEventType, ev: &CGEvent, ctx: &TapCtx) -> Option<(Held, bool)
             });
             None
         }
+        CGEventType(18) | CGEventType(30) | CGEventType(32) => {
+            gesture(ev, |gesture, phase| send(Captured::Gesture { gesture, phase }));
+            None
+        }
         _ => None,
     }
+}
+
+/// Reads a trackpad gesture through the public AppKit accessors (`+[NSEvent
+/// eventWithCGEvent:]`, `magnification`, `rotation`, `phase`) and hands it to `out`.
+fn gesture(ev: &CGEvent, out: impl FnOnce(Gesture, Phase)) {
+    let Some(ns) = NSEvent::eventWithCGEvent(ev) else {
+        return;
+    };
+    // `magnification` is a fraction (0.01 = 1%), `rotation` degrees, counter-clockwise positive.
+    let g = match ns.r#type() {
+        NSEventType::Magnify => Gesture::Magnify {
+            milli: (ns.magnification() * 1000.0).round() as i32,
+        },
+        NSEventType::Rotate => Gesture::Rotate {
+            millideg: (f64::from(ns.rotation()) * 1000.0).round() as i32,
+        },
+        NSEventType::SmartMagnify => Gesture::SmartZoom,
+        _ => return,
+    };
+    let p = ns.phase();
+    let phase = if p.contains(NSEventPhase::Began) {
+        Phase::Began
+    } else if p.contains(NSEventPhase::Ended) {
+        Phase::Ended
+    } else if p.contains(NSEventPhase::Cancelled) {
+        Phase::Cancelled
+    } else if p.contains(NSEventPhase::Changed) {
+        Phase::Changed
+    } else {
+        Phase::None
+    };
+    out(g, phase);
 }
 
 /// Posts input that apps cannot tell apart from real Apple hardware.
@@ -656,6 +698,11 @@ impl Injector {
             None => false,
         }
     }
+
+    /// Does nothing: macOS has no public API to post a magnify, rotate or smart-zoom event
+    /// (only private CGEvent fields), so Mac receivers ignore gestures until the owner
+    /// approves private APIs.
+    pub fn gesture(&mut self, _gesture: Gesture, _phase: Phase) {}
 
     /// Posts one scroll event with its gesture/momentum phase, so trackpad scrolling
     /// with inertia and rubber-banding looks native. Pixel deltas are marked continuous
