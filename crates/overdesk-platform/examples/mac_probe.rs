@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Hand test for the macOS adapter. Never swallows input and always exits by itself.
 //!
-//!   cargo run -p overdesk-platform --example mac_probe -- listen   # print captured input for 10 s
+//!   cargo run -p overdesk-platform --example mac_probe -- listen [secs]   # print captured input (default 10 s)
 //!   cargo run -p overdesk-platform --example mac_probe -- inject   # draw a small square, scroll, tap Shift
 //!   cargo run -p overdesk-platform --example mac_probe -- jump     # inject a jump, then print your next real moves
 
@@ -21,8 +21,9 @@ fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("listen") => {
             let (_capture, rx) = Capture::start().expect("tap");
-            let end = Instant::now() + Duration::from_secs(10);
-            println!("Listening for 10 s (input still reaches apps)...");
+            let secs: u64 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(10);
+            let end = Instant::now() + Duration::from_secs(secs);
+            println!("Listening for {secs} s (input still reaches apps)...");
             while let Some(left) = end.checked_duration_since(Instant::now()) {
                 if let Ok(ev) = rx.recv_timeout(left) {
                     println!("{ev:?}");
