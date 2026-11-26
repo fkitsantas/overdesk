@@ -21,8 +21,10 @@ use crate::pairing::{Fingerprint, fingerprint};
 pub const ALPN: &[u8] = b"overdesk/1";
 /// TLS server name; certificates are pinned by fingerprint, never matched by name.
 const SERVER_NAME: &str = "overdesk";
-const KEEP_ALIVE: Duration = Duration::from_secs(2);
-const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+// A vanished peer (crash, sleep, cable) is noticed within ~3 s, so its held keys
+// are released and swallowed input comes back quickly.
+const KEEP_ALIVE: Duration = Duration::from_secs(1);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(3);
 /// First byte on the control stream. QUIC only announces a stream to the peer once data
 /// is written, so the dialer sends this immediately; it doubles as a stream-format version.
 const STREAM_PREAMBLE: u8 = 1;
@@ -175,7 +177,7 @@ impl ClientCertVerifier for PinLater {
 fn transport() -> Arc<TransportConfig> {
     let mut t = TransportConfig::default();
     t.keep_alive_interval(Some(KEEP_ALIVE));
-    t.max_idle_timeout(Some(IDLE_TIMEOUT.try_into().expect("10 s fits a QUIC varint")));
+    t.max_idle_timeout(Some(IDLE_TIMEOUT.try_into().expect("3 s fits a QUIC varint")));
     // One control stream per connection and windows just above one frame: quinn's
     // defaults (100+100 streams, unbounded connection window) let any peer that merely
     // completes TLS make us buffer hundreds of megabytes.
@@ -373,32 +375,25 @@ impl Link {
     }
 
     async fn send_frame<T: Serialize>(&mut self, msg: &T) -> Result<(), NetError> {
-        let frame = encode_frame(msg)?;
-        self.send.write_all(&frame).await.map_err(closed)
+        write_frame(&mut self.send, msg).await
     }
 
-    /// Reads one frame: 4-byte length, limit check, then the body as it arrives, so a
-    /// peer that announces a large frame and dribbles bytes cannot pin `max_len` of memory.
-    /// Not cancel-safe: abandoning it mid-frame desynchronises the stream.
     async fn recv_frame<T: DeserializeOwned>(&mut self, max_len: usize) -> Result<T, NetError> {
-        let mut len = [0u8; 4];
-        self.recv.read_exact(&mut len).await.map_err(closed)?;
-        let n = u32::from_be_bytes(len) as usize;
-        if n > max_len {
-            self.close("frame too large");
-            return Err(FrameError::TooLarge(n).into());
-        }
-        let mut frame = len.to_vec();
-        while frame.len() < 4 + n {
-            let want = 4 + n - frame.len();
-            let chunk = self.recv.read_chunk(want, true).await.map_err(closed)?;
-            let chunk = chunk.ok_or_else(|| closed("stream ended mid-frame"))?;
-            frame.extend_from_slice(&chunk.bytes);
-        }
-        match overdesk_proto::decode_frame(&frame)? {
-            Some((msg, _)) => Ok(msg),
-            None => unreachable!("frame is complete by construction"),
-        }
+        read_frame(&mut self.recv, &self.conn, max_len).await
+    }
+
+    /// Splits a trusted link into independent writer and reader halves, so one task
+    /// can read while another writes. Untrusted links never split.
+    pub fn split(self) -> Result<(LinkTx, LinkRx), NetError> {
+        self.require_trust()?;
+        let Link { conn, send, recv, .. } = self;
+        Ok((
+            LinkTx {
+                conn: conn.clone(),
+                send,
+            },
+            LinkRx { conn, recv },
+        ))
     }
 
     pub fn send_motion(&self, m: &Motion) -> Result<(), NetError> {
@@ -414,6 +409,82 @@ impl Link {
 
     pub fn close(&self, reason: &str) {
         self.conn.close(0u32.into(), reason.as_bytes());
+    }
+
+    /// Resolves when the connection is gone (closed, timed out, or lost).
+    pub async fn closed(&self) -> String {
+        self.conn.closed().await.to_string()
+    }
+}
+
+async fn write_frame<T: Serialize>(send: &mut SendStream, msg: &T) -> Result<(), NetError> {
+    let frame = encode_frame(msg)?;
+    send.write_all(&frame).await.map_err(closed)
+}
+
+/// Reads one frame: 4-byte length, limit check, then the body as it arrives, so a
+/// peer that announces a large frame and dribbles bytes cannot pin `max_len` of memory.
+/// Not cancel-safe: abandoning it mid-frame desynchronises the stream, so give each
+/// stream a single reader that always runs to completion.
+async fn read_frame<T: DeserializeOwned>(
+    recv: &mut RecvStream,
+    conn: &Connection,
+    max_len: usize,
+) -> Result<T, NetError> {
+    let mut len = [0u8; 4];
+    recv.read_exact(&mut len).await.map_err(closed)?;
+    let n = u32::from_be_bytes(len) as usize;
+    if n > max_len {
+        conn.close(0u32.into(), b"frame too large");
+        return Err(FrameError::TooLarge(n).into());
+    }
+    let mut frame = len.to_vec();
+    while frame.len() < 4 + n {
+        let want = 4 + n - frame.len();
+        let chunk = recv.read_chunk(want, true).await.map_err(closed)?;
+        let chunk = chunk.ok_or_else(|| closed("stream ended mid-frame"))?;
+        frame.extend_from_slice(&chunk.bytes);
+    }
+    match overdesk_proto::decode_frame(&frame)? {
+        Some((msg, _)) => Ok(msg),
+        None => unreachable!("frame is complete by construction"),
+    }
+}
+
+/// Writer half of a trusted [`Link`].
+pub struct LinkTx {
+    conn: Connection,
+    send: SendStream,
+}
+
+impl LinkTx {
+    pub async fn send_control(&mut self, msg: &Control) -> Result<(), NetError> {
+        write_frame(&mut self.send, msg).await
+    }
+
+    pub fn send_motion(&self, m: &Motion) -> Result<(), NetError> {
+        self.conn.send_datagram(encode_motion(m).into()).map_err(closed)
+    }
+
+    pub fn close(&self, reason: &str) {
+        self.conn.close(0u32.into(), reason.as_bytes());
+    }
+}
+
+/// Reader half of a trusted [`Link`].
+pub struct LinkRx {
+    conn: Connection,
+    recv: RecvStream,
+}
+
+impl LinkRx {
+    pub async fn recv_control(&mut self) -> Result<Control, NetError> {
+        read_frame(&mut self.recv, &self.conn, MAX_FRAME_LEN).await
+    }
+
+    pub async fn recv_motion(&self) -> Result<Motion, NetError> {
+        let d = self.conn.read_datagram().await.map_err(closed)?;
+        Ok(decode_motion(&d)?)
     }
 
     /// Resolves when the connection is gone (closed, timed out, or lost).
