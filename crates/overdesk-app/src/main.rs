@@ -98,6 +98,10 @@ struct App {
     answered: bool,
     /// Whether the "Enter an address instead" fallback is expanded.
     show_address: bool,
+    /// Whether the window has focus. Pairing opens only while it does: pairing needs
+    /// both people looking at both screens anyway, and an unattended machine must
+    /// never let a LAN device pop a code prompt. Starts `false`, so it fails closed.
+    focused: bool,
 }
 
 /// Everything that can change the app: controller events, system events and user input.
@@ -113,8 +117,10 @@ enum Message {
     Frame,
     /// Show or hide the address fallback.
     ToggleAddress,
-    /// Re-open the pairing window while the idle screen is showing.
+    /// Re-open the pairing window while it is still wanted (see [`App::pairing_wanted`]).
     KeepPairingOpen,
+    /// The window gained (`true`) or lost (`false`) focus.
+    Focus(bool),
     /// The address field changed.
     Address(String),
     /// The user picked which side the other device is on.
@@ -159,6 +165,7 @@ impl App {
                 phase: 0.3,
                 answered: false,
                 show_address: false,
+                focused: false,
             };
             return (app, preview::shoot());
         }
@@ -180,6 +187,7 @@ impl App {
             phase: 0.0,
             answered: false,
             show_address: false,
+            focused: false,
         };
         let theme = iced::system::theme().map(Message::Theme);
         (
@@ -192,14 +200,28 @@ impl App {
         )
     }
 
-    /// Applies a message. Connection changes happen only by sending controller commands.
+    /// Whether pairing should be open: only while the window is focused and the
+    /// controller is idle. Pairing needs both people looking at both screens anyway.
+    fn pairing_wanted(&self) -> bool {
+        self.focused && matches!(&self.screen, Screen::Running { state, .. } if state.phase == Phase::Idle)
+    }
+
+    /// Applies a message, then opens or closes pairing if [`Self::pairing_wanted`] changed.
+    /// Connection changes happen only by sending controller commands.
     fn update(&mut self, message: Message) -> Task<Message> {
+        let before = self.pairing_wanted();
+        let task = self.apply(message);
+        let after = self.pairing_wanted();
+        if before != after {
+            self.send(Command::AllowPairing(after));
+        }
+        task
+    }
+
+    /// Applies a message to the app's state.
+    fn apply(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Started(Ok((commands, state))) => {
-                // The first state is idle: open pairing, as on every entry to idle.
-                if state.phase == Phase::Idle {
-                    let _ = commands.send(Command::AllowPairing(true));
-                }
                 self.screen = Screen::Running { commands, state };
             }
             Message::Started(Err(e)) => self.screen = Screen::Failed(e),
@@ -207,13 +229,7 @@ impl App {
                 if !matches!(new.phase, Phase::Pairing { .. }) {
                     self.answered = false;
                 }
-                if let Screen::Running { state, commands } = &mut self.screen {
-                    // Pairing stays open exactly while the idle screen shows.
-                    match (state.phase == Phase::Idle, new.phase == Phase::Idle) {
-                        (false, true) => _ = commands.send(Command::AllowPairing(true)),
-                        (true, false) => _ = commands.send(Command::AllowPairing(false)),
-                        _ => {}
-                    }
+                if let Screen::Running { state, .. } = &mut self.screen {
                     *state = new;
                 }
             }
@@ -234,7 +250,13 @@ impl App {
             Message::Theme(mode) => self.theme = mode,
             Message::Frame => self.phase = (self.phase + 0.04) % 1.0,
             Message::ToggleAddress => self.show_address = !self.show_address,
-            Message::KeepPairingOpen => self.send(Command::AllowPairing(true)),
+            Message::Focus(f) => self.focused = f,
+            // The subscription only exists while wanted, but a queued tick may outlive it.
+            Message::KeepPairingOpen => {
+                if self.pairing_wanted() {
+                    self.send(Command::AllowPairing(true));
+                }
+            }
             Message::Address(a) => self.address = a,
             Message::Side(s) => self.side = s,
             Message::Connect => {
@@ -242,6 +264,7 @@ impl App {
                     self.send(Command::Connect {
                         address,
                         side: self.side,
+                        expect: None, // a typed address has no earlier identity to hold it to
                     });
                 }
             }
@@ -271,15 +294,22 @@ impl App {
         if cfg!(feature = "preview") && std::env::var_os("OVERDESK_PREVIEW").is_some() {
             return Subscription::none();
         }
-        let mut subs = vec![iced::system::theme_changes().map(Message::Theme)];
+        let mut subs = vec![
+            iced::system::theme_changes().map(Message::Theme),
+            iced::window::events().filter_map(|(_, e)| match e {
+                iced::window::Event::Focused => Some(Message::Focus(true)),
+                iced::window::Event::Unfocused => Some(Message::Focus(false)),
+                _ => None,
+            }),
+        ];
         // Granting a permission in System Settings sends no event, so poll while waiting.
         if matches!(self.screen, Screen::Permissions { .. }) {
             subs.push(iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::PollPermissions));
         }
         if let Screen::Running { state, .. } = &self.screen {
             subs.push(Subscription::run(watch_state));
-            // The pairing window lasts 120 s; renew it before it closes.
-            if state.phase == Phase::Idle {
+            // The pairing window lasts 120 s; renew it before it closes, while still wanted.
+            if self.pairing_wanted() {
                 subs.push(iced::time::every(std::time::Duration::from_secs(90)).map(|_| Message::KeepPairingOpen));
             }
             // Animate the ribbon only while the cursor is on another device.
@@ -473,6 +503,8 @@ impl App {
                     .on_press(Message::Send(Command::Connect {
                         address: d.address,
                         side: self.side,
+                        // Hold a paired device to its pinned identity; a first pairing has none.
+                        expect: d.paired.then_some(d.id),
                     }));
                 let mut info = row![text(os_word(d.os)).style(muted)].spacing(8);
                 if d.paired {

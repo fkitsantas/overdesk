@@ -93,8 +93,14 @@ pub struct NearbyDevice {
     /// The device's operating system.
     pub os: Os,
     /// Where to dial it; pass it to [`Command::Connect`].
+    ///
+    /// Only a hint: it comes from an unauthenticated announcement and is verified by the
+    /// handshake when connecting (see `Command::Connect`'s `expect`).
     pub address: SocketAddr,
-    /// Whether this device is already paired (pinned) with this one.
+    /// The id the device announced; pass it as `expect` when connecting to a paired one.
+    pub id: PeerId,
+    /// Whether a pinned device has this id. Display only: the id is unauthenticated, so
+    /// trust comes from the handshake, never from this flag.
     pub paired: bool,
 }
 
@@ -127,6 +133,11 @@ pub enum Command {
         address: SocketAddr,
         /// Where the other device's screen sits relative to this one.
         side: Side,
+        /// The device this must turn out to be. The UI sets it when the user picked a
+        /// nearby device shown as paired: mDNS is unauthenticated, so the dialed peer's
+        /// fingerprint must match this id *and* be pinned, or the link is dropped.
+        /// `None` means a first pairing or a typed address; the code check protects those.
+        expect: Option<PeerId>,
     },
     /// The user's answer to the pairing code: `true` if both screens match.
     AnswerCode(bool),
@@ -288,13 +299,13 @@ async fn control<P: Platform + Clone + Sync>(
         tokio::select! {
             cmd = commands.recv() => match cmd {
                 None => break,
-                Some(Command::Connect { address, side }) if !busy(&active) => {
+                Some(Command::Connect { address, side, expect }) if !busy(&active) => {
                     let generation = shared.begin(Phase::Connecting { address });
                     // Dial inside the task: a slow peer must not block Disconnect.
                     let (node, shared) = (node.clone(), shared.clone());
                     active = Some(tokio::spawn(async move {
                         let link = node.connect(address).await;
-                        session(shared, generation, link, side, false).await;
+                        session(shared, generation, link, side, false, expect).await;
                     }));
                 }
                 // Already in a session: the UI only offers Connect when idle, and
@@ -354,7 +365,7 @@ async fn control<P: Platform + Clone + Sync>(
                 let shared = shared.clone();
                 // The listener's side is decided by the dialer's Desk.
                 active = Some(tokio::spawn(async move {
-                    session(shared, generation, Ok(link), Side::Right, true).await;
+                    session(shared, generation, Ok(link), Side::Right, true, None).await;
                 }));
             }
         }
@@ -363,13 +374,15 @@ async fn control<P: Platform + Clone + Sync>(
 
 /// Pairs if needed, establishes the Desk, runs until the peer is lost.
 /// `inbound` connections from unknown devices pair only while pairing is open, and
-/// all state writes are dropped once `generation` is stale.
+/// all state writes are dropped once `generation` is stale. A dial with `expect` set
+/// connects only to a pinned peer with that id and never falls back to pairing.
 async fn session<P: Platform + Clone + Sync>(
     shared: Arc<Shared<P>>,
     generation: u64,
     link: Result<Link, NetError>,
     side: Side,
     inbound: bool,
+    expect: Option<PeerId>,
 ) {
     let mut link = match link {
         Ok(l) => l,
@@ -378,6 +391,17 @@ async fn session<P: Platform + Clone + Sync>(
         Err(e) => return shared.set(generation, Phase::Error(format!("Couldn't connect: {e}")), None),
     };
     let peer_fp = link.peer_fingerprint();
+    if let Some(id) = expect
+        && (peer_id(&peer_fp) != id || !shared.store.pins().unwrap_or_default().contains(&peer_fp))
+    {
+        // Someone else answered at the announced address: never offer to pair with them.
+        link.close("unexpected peer");
+        return shared.set(
+            generation,
+            Phase::Error("This isn't the computer you paired with. Pair it again if it was reset.".into()),
+            None,
+        );
+    }
     // An unknown device: pairing is the only way in.
     if !shared.store.pins().unwrap_or_default().contains(&peer_fp) {
         if inbound && !shared.pairing_allowed() {
@@ -484,7 +508,8 @@ fn desk_view(s: &Session, my_name: &str) -> Vec<ScreenView> {
 }
 
 /// Folds one network change into the devices heard so far: a device is kept by id, so
-/// re-announcing replaces it, and `Lost` removes it.
+/// re-announcing replaces it, and `Lost` removes it. The address is only a hint, since
+/// anyone can announce any id; it is verified against the pin when connecting.
 fn apply(found: &mut BTreeMap<PeerId, Nearby>, change: Change) {
     match change {
         Change::Found(n) => {
@@ -506,6 +531,7 @@ fn nearby_list(found: &BTreeMap<PeerId, Nearby>, pins: &BTreeSet<Fingerprint>) -
             name: n.name.clone(),
             os: n.os,
             address: n.address,
+            id: n.id,
             paired: paired.contains(&n.id),
         })
         .collect();

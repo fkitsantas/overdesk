@@ -8,9 +8,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use overdesk_core::engine::{Action, Mode};
+use overdesk_net::pairing::peer_id;
 use overdesk_net::session::Me;
+use overdesk_net::store::Store;
 use overdesk_net::transport::{Identity, Node};
-use overdesk_proto::Os;
+use overdesk_proto::{Os, PeerId};
 use overdeskd::controller::{AppState, Command, Config, Phase, spawn};
 use overdeskd::{Platform, Side};
 use tokio::sync::watch;
@@ -72,6 +74,7 @@ async fn pair_connect_and_lose_a_peer() {
         .send(Command::Connect {
             address: b_addr,
             side: Side::Right,
+            expect: None,
         })
         .unwrap();
     let pa = wait(&mut a, "A pairing code", |p| matches!(p, Phase::Pairing { .. })).await;
@@ -116,6 +119,7 @@ async fn declined_pairing_returns_to_idle_with_a_reason() {
         .send(Command::Connect {
             address: b_addr,
             side: Side::Right,
+            expect: None,
         })
         .unwrap();
     wait(&mut a, "A pairing", |p| matches!(p, Phase::Pairing { .. })).await;
@@ -136,6 +140,7 @@ async fn unknown_device_cannot_prompt_unless_pairing_is_open() {
         .send(Command::Connect {
             address: b_addr,
             side: Side::Right,
+            expect: None,
         })
         .unwrap();
     wait(&mut a, "A refused", |p| matches!(p, Phase::Error(_))).await;
@@ -175,6 +180,7 @@ async fn connect_pair(
         .send(Command::Connect {
             address: b_addr,
             side: Side::Right,
+            expect: None,
         })
         .unwrap();
     wait(a, "A pairing", |p| matches!(p, Phase::Pairing { .. })).await;
@@ -183,6 +189,56 @@ async fn connect_pair(
     b_cmd.send(Command::AnswerCode(true)).unwrap();
     wait(a, "A connected", |p| matches!(p, Phase::Connected { .. })).await;
     wait(b, "B connected", |p| matches!(p, Phase::Connected { .. })).await;
+}
+
+/// The id a device announces and is pinned under, read from its store folder.
+fn id_of(name: &str) -> PeerId {
+    let dir = std::env::temp_dir().join(format!("overdesk-ctl-{name}-{}", std::process::id()));
+    peer_id(&Store::open(&dir).unwrap().identity().unwrap().fingerprint())
+}
+
+#[tokio::test]
+async fn expecting_a_different_device_errors_and_never_pairs() {
+    let (a_cmd, mut a) = spawn(config("exp-a", Os::MacOs, 1440, 900), Fake).await.unwrap();
+    let (b_cmd, b) = spawn(config("exp-b", Os::Windows, 1920, 1080), Fake).await.unwrap();
+    let b_addr = b.borrow().address.unwrap();
+    // Pairing is open on B, so the old behavior would have fallen back to a code prompt.
+    b_cmd.send(Command::AllowPairing(true)).unwrap();
+    a_cmd
+        .send(Command::Connect {
+            address: b_addr,
+            side: Side::Right,
+            expect: Some(PeerId([7; 16])),
+        })
+        .unwrap();
+    let got = wait(&mut a, "A error", |p| matches!(p, Phase::Error(_))).await;
+    assert_eq!(
+        got.phase,
+        Phase::Error("This isn't the computer you paired with. Pair it again if it was reset.".into())
+    );
+    for _ in 0..20 {
+        assert!(!matches!(a.borrow().phase, Phase::Pairing { .. }), "A never prompts");
+        assert!(!matches!(b.borrow().phase, Phase::Pairing { .. }), "B never prompts");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[tokio::test]
+async fn expecting_the_pinned_device_reconnects() {
+    let (a_cmd, mut a) = spawn(config("rec-a", Os::MacOs, 1440, 900), Fake).await.unwrap();
+    let (b_cmd, mut b) = spawn(config("rec-b", Os::Windows, 1920, 1080), Fake).await.unwrap();
+    connect_pair(&a_cmd, &mut a, &b_cmd, &mut b).await;
+    a_cmd.send(Command::Disconnect).unwrap();
+    wait(&mut a, "A idle", |p| *p == Phase::Idle).await;
+    wait(&mut b, "B lost", |p| matches!(p, Phase::Lost { .. })).await;
+    a_cmd
+        .send(Command::Connect {
+            address: b.borrow().address.unwrap(),
+            side: Side::Right,
+            expect: Some(id_of("rec-b")),
+        })
+        .unwrap();
+    wait(&mut a, "A reconnected", |p| matches!(p, Phase::Connected { .. })).await;
 }
 
 #[tokio::test]
@@ -259,6 +315,7 @@ async fn connect_while_connected_leaves_the_session_alone() {
         .send(Command::Connect {
             address: addr,
             side: Side::Left,
+            expect: None,
         })
         .unwrap();
     // The live session's screen must survive a stray Connect.

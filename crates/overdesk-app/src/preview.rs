@@ -60,12 +60,14 @@ pub fn state(which: &str) -> (AppState, Option<(bool, bool)>) {
         nearby: if which == "idle" {
             vec![
                 NearbyDevice {
+                    id: PeerId([3; 16]),
                     name: "Studio Mac".into(),
                     os: Os::MacOs,
                     address: "192.168.1.20:24801".parse().unwrap(),
                     paired: true,
                 },
                 NearbyDevice {
+                    id: PeerId([4; 16]),
                     name: "Work PC".into(),
                     os: Os::Windows,
                     address: "192.168.1.50:24801".parse().unwrap(),
