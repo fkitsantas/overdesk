@@ -11,6 +11,15 @@ pub const PROTOCOL_VERSION: u16 = 1;
 pub const MAX_FRAME_LEN: usize = 1024 * 1024;
 const LEN_PREFIX: usize = 4;
 
+/// Key codes are `page_selector | usage`: the low 16 bits hold a USB HID usage id and the
+/// high 16 bits select its usage page. Selector 0 is the keyboard page (0x07), so plain
+/// keyboard usages need no tag.
+pub const PAGE_KEYBOARD: u32 = 0;
+/// HID consumer page (0x0C): media, volume, brightness, eject.
+pub const PAGE_CONSUMER: u32 = 0x0C << 16;
+/// Apple vendor "top case" page (0xFF): Fn / Globe is usage 0x03.
+pub const PAGE_APPLE_TOP_CASE: u32 = 0xFF << 16;
+
 /// Stable device identity, derived from the device's public key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PeerId(pub [u8; 16]);
@@ -49,6 +58,8 @@ pub enum Phase {
     Changed,
     Ended,
     Cancelled,
+    /// Fingers touched the trackpad but have not moved yet; stops running momentum.
+    MayBegin,
     MomentumBegan,
     Momentum,
     MomentumEnded,
@@ -96,7 +107,7 @@ pub enum Control {
         gesture: Gesture,
         phase: Phase,
     },
-    /// `code` is a platform-neutral USB HID usage id.
+    /// `code` is `page_selector | HID usage`; see [`PAGE_KEYBOARD`].
     Key {
         code: u32,
         pressed: bool,
