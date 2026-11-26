@@ -3,7 +3,9 @@
 //! lives in the pure `events` / `keymap` modules.
 #![allow(unsafe_code)] // FFI boundary; each unsafe block states its invariant.
 
+use std::cell::{OnceCell, RefCell};
 use std::ffi::c_void;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::{NonNull, null_mut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,7 +22,8 @@ use objc2_core_graphics::{
 use overdesk_proto::{Button, Phase, ScrollUnit};
 
 use super::events::{
-    ClickCounter, ModChange, MoveKind, flags_for, modifier_change, move_kind, phase_from_cg, phase_to_cg,
+    ClickCounter, Held, LocalDowns, ModChange, MoveKind, Subpixel, flags_for, modifier_change, move_kind,
+    phase_from_cg, phase_to_cg,
 };
 use super::keymap::{code_to_vk, vk_to_code};
 
@@ -84,8 +87,13 @@ pub enum Captured {
 struct TapCtx {
     tx: Sender<Captured>,
     swallow: Arc<AtomicBool>,
-    port: std::cell::OnceCell<CFRetained<CFMachPort>>,
+    port: OnceCell<CFRetained<CFMachPort>>,
+    local: RefCell<LocalDowns>,
+    sub: RefCell<Subpixel>,
 }
+
+/// `kCGEventFlagMaskAlphaShift`: Caps Lock state, owned by the system, never by us.
+const FLAG_CAPS_LOCK: u64 = 0x0001_0000;
 
 /// A running event tap. Dropping it stops the tap thread.
 pub struct Capture {
@@ -98,8 +106,11 @@ impl Capture {
     /// Starts the tap on its own run-loop thread. Events are delivered unmodified to
     /// local apps until [`Capture::set_swallow`] is turned on.
     pub fn start() -> Result<(Self, Receiver<Captured>), MacError> {
-        if !permissions().0 {
-            return Err(MacError::NoListenPermission);
+        // An active (event-consuming) tap needs Accessibility as well as Input Monitoring.
+        match permissions() {
+            (false, _) => return Err(MacError::NoListenPermission),
+            (_, false) => return Err(MacError::NoPostPermission),
+            _ => {}
         }
         let (tx, rx) = channel();
         let (ready_tx, ready_rx) = channel();
@@ -161,7 +172,9 @@ fn run_tap(tx: Sender<Captured>, swallow: Arc<AtomicBool>, stop: Arc<AtomicBool>
     let ctx = Box::new(TapCtx {
         tx,
         swallow,
-        port: std::cell::OnceCell::new(),
+        port: OnceCell::new(),
+        local: RefCell::new(LocalDowns::default()),
+        sub: RefCell::new(Subpixel::default()),
     });
     let ctx_ptr = &*ctx as *const TapCtx as *mut c_void;
     let callback: CGEventTapCallBack = Some(tap_callback);
@@ -202,6 +215,8 @@ fn run_tap(tx: Sender<Captured>, swallow: Arc<AtomicBool>, stop: Arc<AtomicBool>
         CFRunLoop::run_in_mode(mode, 0.1, false);
     }
     CGEvent::tap_enable(&port, false);
+    run_loop.remove_source(Some(&source), mode);
+    port.invalidate();
     drop(source);
     drop(port);
     drop(ctx);
@@ -213,9 +228,19 @@ unsafe extern "C-unwind" fn tap_callback(
     event: NonNull<CGEvent>,
     info: *mut c_void,
 ) -> *mut CGEvent {
-    // SAFETY: `info` is the `TapCtx` pointer given to `tap_create`, alive for the tap's life.
-    let ctx = unsafe { &*(info as *const TapCtx) };
     let raw = event.as_ptr();
+    // A panic must never unwind into WindowServer code; on panic, let the event through.
+    catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: `info` is the `TapCtx` pointer given to `tap_create`, alive for the tap's life.
+        let ctx = unsafe { &*(info as *const TapCtx) };
+        // SAFETY: Quartz hands us a valid event for the duration of the callback.
+        let ev = unsafe { event.as_ref() };
+        handle(ctx, ty, ev, raw)
+    }))
+    .unwrap_or(raw)
+}
+
+fn handle(ctx: &TapCtx, ty: CGEventType, ev: &CGEvent, raw: *mut CGEvent) -> *mut CGEvent {
     if ty == CGEventType::TapDisabledByTimeout || ty == CGEventType::TapDisabledByUserInput {
         // macOS disables slow taps; turn ourselves back on immediately.
         if let Some(port) = ctx.port.get() {
@@ -223,21 +248,30 @@ unsafe extern "C-unwind" fn tap_callback(
         }
         return raw;
     }
-    // SAFETY: Quartz hands us a valid event for the duration of the callback.
-    let ev = unsafe { event.as_ref() };
     if CGEvent::integer_value_field(Some(ev), CGEventField::EventSourceUserData) == INJECTED_TAG {
         return raw;
     }
-    translate(ty, ev, &ctx.tx);
-    if ctx.swallow.load(Ordering::Relaxed) {
-        null_mut()
-    } else {
-        raw
-    }
+    let swallowing = ctx.swallow.load(Ordering::Relaxed);
+    let deliver = match translate(ty, ev, ctx) {
+        Some((held, down)) => ctx.local.borrow_mut().deliver_locally(held, down, swallowing),
+        None => !swallowing,
+    };
+    if deliver { raw } else { null_mut() }
 }
 
 fn field(ev: &CGEvent, f: CGEventField) -> i64 {
     CGEvent::integer_value_field(Some(ev), f)
+}
+
+/// Quartz button number: 0 left, 1 right, 2 middle, 3 back, 4 forward.
+fn button_number(b: Button) -> i64 {
+    match b {
+        Button::Left => 0,
+        Button::Right => 1,
+        Button::Middle => 2,
+        Button::Back => 3,
+        Button::Forward => 4,
+    }
 }
 
 fn other_button(n: i64) -> Option<Button> {
@@ -249,51 +283,59 @@ fn other_button(n: i64) -> Option<Button> {
     }
 }
 
-/// Sends never block (unbounded channel), keeping the tap well under its timeout.
-fn translate(ty: CGEventType, ev: &CGEvent, tx: &Sender<Captured>) {
+/// Sends captured input to the channel and returns the press/release edge it
+/// represents, if any. Sends never block (unbounded channel), keeping the tap well
+/// under its timeout.
+fn translate(ty: CGEventType, ev: &CGEvent, ctx: &TapCtx) -> Option<(Held, bool)> {
     let send = |c| {
-        let _ = tx.send(c);
+        let _ = ctx.tx.send(c);
     };
-    let button = |button, pressed| send(Captured::Button { button, pressed });
+    let button = |button, pressed| {
+        send(Captured::Button { button, pressed });
+        Some((Held::Button(button), pressed))
+    };
+    let key = |code, pressed| {
+        send(Captured::Key { code, pressed });
+        Some((Held::Key(code), pressed))
+    };
     match ty {
         CGEventType::MouseMoved
         | CGEventType::LeftMouseDragged
         | CGEventType::RightMouseDragged
-        | CGEventType::OtherMouseDragged => send(Captured::Moved {
-            dx: field(ev, CGEventField::MouseEventDeltaX) as i32,
-            dy: field(ev, CGEventField::MouseEventDeltaY) as i32,
-        }),
+        | CGEventType::OtherMouseDragged => {
+            // The double fields keep sub-pixel motion that the integer fields round away.
+            let (dx, dy) = ctx.sub.borrow_mut().feed(
+                CGEvent::double_value_field(Some(ev), CGEventField::MouseEventDeltaX),
+                CGEvent::double_value_field(Some(ev), CGEventField::MouseEventDeltaY),
+            );
+            if (dx, dy) != (0, 0) {
+                send(Captured::Moved { dx, dy });
+            }
+            None
+        }
         CGEventType::LeftMouseDown => button(Button::Left, true),
         CGEventType::LeftMouseUp => button(Button::Left, false),
         CGEventType::RightMouseDown => button(Button::Right, true),
         CGEventType::RightMouseUp => button(Button::Right, false),
         CGEventType::OtherMouseDown | CGEventType::OtherMouseUp => {
-            if let Some(b) = other_button(field(ev, CGEventField::MouseEventButtonNumber)) {
-                button(b, ty == CGEventType::OtherMouseDown);
-            }
+            other_button(field(ev, CGEventField::MouseEventButtonNumber))
+                .and_then(|b| button(b, ty == CGEventType::OtherMouseDown))
         }
-        CGEventType::KeyDown | CGEventType::KeyUp => {
-            // The receiving OS generates its own key repeat; forwarding ours would double it.
-            if field(ev, CGEventField::KeyboardEventAutorepeat) != 0 {
-                return;
-            }
-            if let Some(code) = vk_to_code(field(ev, CGEventField::KeyboardEventKeycode) as u16) {
-                send(Captured::Key {
-                    code,
-                    pressed: ty == CGEventType::KeyDown,
-                });
-            }
-        }
+        // Repeats are forwarded: an injected key-down does not auto-repeat on the
+        // receiving OS, so the source keyboard's own repeat rate is what the user expects.
+        CGEventType::KeyDown | CGEventType::KeyUp => vk_to_code(field(ev, CGEventField::KeyboardEventKeycode) as u16)
+            .and_then(|code| key(code, ty == CGEventType::KeyDown)),
         CGEventType::FlagsChanged => {
             let vk = field(ev, CGEventField::KeyboardEventKeycode) as u16;
             match modifier_change(vk, CGEvent::flags(Some(ev)).0) {
-                Some(ModChange::Press(code)) => send(Captured::Key { code, pressed: true }),
-                Some(ModChange::Release(code)) => send(Captured::Key { code, pressed: false }),
+                Some(ModChange::Press(code)) => key(code, true),
+                Some(ModChange::Release(code)) => key(code, false),
                 Some(ModChange::Toggle(code)) => {
                     send(Captured::Key { code, pressed: true });
                     send(Captured::Key { code, pressed: false });
+                    None
                 }
-                None => {}
+                None => None,
             }
         }
         CGEventType::ScrollWheel => {
@@ -321,8 +363,9 @@ fn translate(ty: CGEventType, ev: &CGEvent, tx: &Sender<Captured>) {
                 unit,
                 phase,
             });
+            None
         }
-        _ => {}
+        _ => None,
     }
 }
 
@@ -359,21 +402,44 @@ impl Injector {
 
     fn post(&self, ev: &CGEvent) {
         CGEvent::set_integer_value_field(Some(ev), CGEventField::EventSourceUserData, INJECTED_TAG);
-        CGEvent::set_flags(Some(ev), CGEventFlags(flags_for(&self.keys)));
+        let caps = CGEvent::flags(Some(ev)).0 & FLAG_CAPS_LOCK;
+        CGEvent::set_flags(Some(ev), CGEventFlags(flags_for(&self.keys) | caps));
         CGEvent::post(CGEventTapLocation::HIDEventTap, Some(ev));
     }
 
     /// Moves the pointer to global display coordinates (points, top-left origin).
     pub fn pointer(&mut self, x: f64, y: f64) {
+        let (dx, dy) = (x - self.pos.x, y - self.pos.y);
         self.pos = CGPoint { x, y };
         let (ty, button) = match move_kind(&self.buttons) {
             MoveKind::Moved => (CGEventType::MouseMoved, CGMouseButton::Left),
             MoveKind::LeftDragged => (CGEventType::LeftMouseDragged, CGMouseButton::Left),
             MoveKind::RightDragged => (CGEventType::RightMouseDragged, CGMouseButton::Right),
-            MoveKind::OtherDragged => (CGEventType::OtherMouseDragged, CGMouseButton::Center),
+            MoveKind::OtherDragged => {
+                let held = self.buttons.iter().find(|b| !matches!(b, Button::Left | Button::Right));
+                (
+                    CGEventType::OtherMouseDragged,
+                    CGMouseButton(held.map_or(2, |b| button_number(*b)) as u32),
+                )
+            }
         };
         if let Some(ev) = CGEvent::new_mouse_event(Some(&self.source), ty, self.pos, button) {
+            // Games, 3D tools and some AppKit drags read relative deltas, not position.
+            CGEvent::set_double_value_field(Some(&ev), CGEventField::MouseEventDeltaX, dx);
+            CGEvent::set_double_value_field(Some(&ev), CGEventField::MouseEventDeltaY, dy);
+            CGEvent::set_integer_value_field(Some(&ev), CGEventField::MouseEventButtonNumber, button.0 as i64);
             self.post(&ev);
+        }
+    }
+
+    /// Releases every key and button this injector holds down. Call when focus leaves
+    /// this Mac or the peer driving it disconnects.
+    pub fn release_all(&mut self) {
+        for code in self.keys.clone().into_iter().rev() {
+            self.key(code, false);
+        }
+        for button in self.buttons.clone() {
+            self.button(button, false);
         }
     }
 
@@ -384,11 +450,7 @@ impl Injector {
             (Button::Right, true) => (CGEventType::RightMouseDown, CGMouseButton::Right, 1),
             (Button::Right, false) => (CGEventType::RightMouseUp, CGMouseButton::Right, 1),
             (b, p) => {
-                let n = match b {
-                    Button::Back => 3,
-                    Button::Forward => 4,
-                    _ => 2,
-                };
+                let n = button_number(b);
                 let ty = if p {
                     CGEventType::OtherMouseDown
                 } else {
@@ -418,9 +480,11 @@ impl Injector {
     /// Returns `false` for codes with no macOS key (media keys are not posted yet).
     pub fn key(&mut self, code: u32, pressed: bool) -> bool {
         let Some(vk) = code_to_vk(code) else { return false };
+        // A press of a key already down is a repeat, and apps expect it marked as one.
+        let repeat = pressed && self.keys.contains(&code);
         // Update held state first: a modifier's own event carries its new flag state.
         if pressed {
-            if !self.keys.contains(&code) {
+            if !repeat {
                 self.keys.push(code);
             }
         } else {
@@ -428,6 +492,7 @@ impl Injector {
         }
         match CGEvent::new_keyboard_event(Some(&self.source), vk, pressed) {
             Some(ev) => {
+                CGEvent::set_integer_value_field(Some(&ev), CGEventField::KeyboardEventAutorepeat, repeat as i64);
                 self.post(&ev);
                 true
             }

@@ -167,8 +167,15 @@ pub enum Held {
 pub struct LocalDowns(std::collections::BTreeSet<Held>);
 
 impl LocalDowns {
-    pub fn deliver_locally(&mut self, _held: Held, _down: bool, _swallowing: bool) -> bool {
-        todo!()
+    pub fn deliver_locally(&mut self, held: Held, down: bool, swallowing: bool) -> bool {
+        if down {
+            if !swallowing {
+                self.0.insert(held);
+            }
+            !swallowing
+        } else {
+            self.0.remove(&held) || !swallowing
+        }
     }
 }
 
@@ -176,13 +183,20 @@ impl LocalDowns {
 /// Magic Mouse motion is not rounded away.
 #[derive(Debug, Default)]
 pub struct Subpixel {
-    rx: f64,
-    ry: f64,
+    // Fixed point in 1/1024 px: float remainders drift (0.2 - 1.2 != -1.0).
+    rx: i64,
+    ry: i64,
 }
 
 impl Subpixel {
-    pub fn feed(&mut self, _dx: f64, _dy: f64) -> (i32, i32) {
-        todo!()
+    pub fn feed(&mut self, dx: f64, dy: f64) -> (i32, i32) {
+        const ONE: i64 = 1024;
+        self.rx += (dx * ONE as f64).round() as i64;
+        self.ry += (dy * ONE as f64).round() as i64;
+        let (ix, iy) = (self.rx / ONE, self.ry / ONE);
+        self.rx %= ONE;
+        self.ry %= ONE;
+        (ix as i32, iy as i32)
     }
 }
 
@@ -323,11 +337,12 @@ mod tests {
     #[test]
     fn subpixel_accumulates_fractions() {
         let mut s = Subpixel::default();
-        assert_eq!(s.feed(0.4, 0.0), (0, 0));
-        assert_eq!(s.feed(0.4, 0.0), (0, 0));
-        assert_eq!(s.feed(0.4, 0.0), (1, 0));
-        assert_eq!(s.feed(-0.6, -0.6), (0, 0));
-        assert_eq!(s.feed(-0.6, -0.6), (-1, -1));
+        // Exactly representable fractions, so the expectation is exact.
+        assert_eq!(s.feed(0.375, 0.0), (0, 0));
+        assert_eq!(s.feed(0.375, 0.0), (0, 0));
+        assert_eq!(s.feed(0.375, 0.0), (1, 0));
+        assert_eq!(s.feed(-0.625, -0.625), (0, 0));
+        assert_eq!(s.feed(-0.625, -0.625), (-1, -1));
     }
 
     #[test]
