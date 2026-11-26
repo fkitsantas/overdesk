@@ -9,6 +9,7 @@ mod desk;
 #[cfg(feature = "preview")]
 mod preview;
 mod style;
+mod tray;
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::OnceLock;
@@ -52,6 +53,7 @@ fn main() -> iced::Result {
     iced::application(App::boot, App::update, App::view)
         .title("Overdesk")
         .subscription(App::subscription)
+        .exit_on_close_request(false) // closing hides the window; the tray menu quits
         .theme(App::theme)
         .window(window_settings())
         .font(include_bytes!("../../../assets/fonts/Inter-Regular.ttf").as_slice())
@@ -129,6 +131,8 @@ struct App {
     /// both people looking at both screens anyway, and an unattended machine must
     /// never let a LAN device pop a code prompt. Starts `false`, so it fails closed.
     focused: bool,
+    /// The menu-bar / system-tray icon, once created (never in a preview).
+    tray: Option<tray::Tray>,
 }
 
 /// Everything that can change the app: controller events, system events and user input.
@@ -146,6 +150,13 @@ enum Message {
     ToggleAddress,
     /// Re-open the pairing window while it is still wanted (see [`App::pairing_wanted`]).
     KeepPairingOpen,
+    /// Create the tray icon. Queued from `boot` so it runs on the main thread inside the
+    /// event loop, which macOS requires.
+    CreateTray,
+    /// The user picked an item from the tray menu.
+    Tray(tray::Action),
+    /// The user closed the window: hide it instead of quitting.
+    CloseRequested(iced::window::Id),
     /// The window gained (`true`) or lost (`false`) focus.
     Focus(bool),
     /// The address field changed.
@@ -193,6 +204,7 @@ impl App {
                 answered: false,
                 show_address: false,
                 focused: false,
+                tray: None,
             };
             return (app, preview::shoot());
         }
@@ -215,8 +227,10 @@ impl App {
             answered: false,
             show_address: false,
             focused: false,
+            tray: None,
         };
         let theme = iced::system::theme().map(Message::Theme);
+        let theme = Task::batch([theme, Task::done(Message::CreateTray)]);
         (
             app,
             if starting {
@@ -258,6 +272,9 @@ impl App {
                 }
                 if let Screen::Running { state, .. } = &mut self.screen {
                     *state = new;
+                    if let Some(tray) = &self.tray {
+                        tray.sync(state);
+                    }
                 }
             }
             Message::PollPermissions => {
@@ -278,6 +295,41 @@ impl App {
             Message::Frame => self.phase = (self.phase + 0.04) % 1.0,
             Message::ToggleAddress => self.show_address = !self.show_address,
             Message::Focus(f) => self.focused = f,
+            Message::CreateTray => {
+                let state = match &self.screen {
+                    Screen::Running { state, .. } => Some(state),
+                    _ => None,
+                };
+                match tray::Tray::new(state) {
+                    Ok(tray) => self.tray = Some(tray),
+                    // Without a tray the window still works; closing it simply quits no more.
+                    Err(e) => eprintln!("overdesk: tray icon unavailable: {e}"),
+                }
+            }
+            Message::CloseRequested(id) => {
+                // With no tray there would be no way back, so closing must quit then.
+                return if self.tray.is_some() {
+                    iced::window::set_mode(id, iced::window::Mode::Hidden)
+                } else {
+                    iced::exit()
+                };
+            }
+            Message::Tray(tray::Action::Show) => {
+                return iced::window::oldest().and_then(|id| {
+                    Task::batch([
+                        iced::window::set_mode(id, iced::window::Mode::Windowed),
+                        iced::window::gain_focus(id),
+                    ])
+                });
+            }
+            Message::Tray(tray::Action::Disconnect) => self.send(Command::Disconnect),
+            Message::Tray(tray::Action::Quit) => {
+                self.send(Command::Disconnect);
+                // Give the controller a moment to release input before the process ends.
+                return Task::perform(tokio::time::sleep(std::time::Duration::from_millis(250)), |()| ())
+                    .discard()
+                    .chain(iced::exit());
+            }
             // The subscription only exists while wanted, but a queued tick may outlive it.
             Message::KeepPairingOpen => {
                 if self.pairing_wanted() {
@@ -322,6 +374,8 @@ impl App {
             return Subscription::none();
         }
         let mut subs = vec![
+            iced::window::close_requests().map(Message::CloseRequested),
+            Subscription::run(tray::actions).map(Message::Tray),
             iced::system::theme_changes().map(Message::Theme),
             iced::window::events().filter_map(|(_, e)| match e {
                 iced::window::Event::Focused => Some(Message::Focus(true)),

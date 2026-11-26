@@ -17,12 +17,13 @@ overdesk-core = { path = "../overdesk-core" }
 overdesk-net = { path = "../overdesk-net" }
 overdesk-proto.workspace = true
 overdeskd = { path = "../overdeskd" }
-tokio = { version = "1.54.1", features = ["sync", "time"] }
-png = { version = "0.18.1", optional = true }
+tokio = { version = "1.54.1", features = ["sync", "time", "rt"] }
+png = "0.18.1"
+tray-icon = "0.27.0"
 
 [features]
 # Design review only: renders a fixed state, saves a screenshot, exits. Never shipped.
-preview = ["dep:png"]
+preview = []
 
 [lints]
 workspace = true
