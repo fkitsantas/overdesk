@@ -6,6 +6,7 @@
 #![cfg_attr(test, allow(clippy::missing_docs_in_private_items))] // test names document themselves
 mod backdrop;
 mod desk;
+mod login;
 #[cfg(feature = "preview")]
 mod preview;
 mod style;
@@ -17,7 +18,9 @@ use std::sync::OnceLock;
 
 use iced::futures::SinkExt;
 use iced::theme::Mode as ThemeMode;
-use iced::widget::{Space, button, canvas, column, container, image, row, scrollable, stack, text, text_input};
+use iced::widget::{
+    Space, button, canvas, column, container, image, row, scrollable, stack, text, text_input, toggler,
+};
 use iced::{Alignment, Element, Fill, Font, Length, Subscription, Task, Theme, font};
 use overdesk_core::engine::Mode;
 use overdesk_net::session::Me;
@@ -138,6 +141,10 @@ struct App {
     update: Option<std::sync::Arc<update::Staged>>,
     /// Whether an update check is in flight.
     checking: bool,
+    /// Whether Overdesk is set to open at login.
+    login: bool,
+    /// Why the last change to "Open at login" failed, until the next attempt.
+    login_error: Option<String>,
 }
 
 /// Everything that can change the app: controller events, system events and user input.
@@ -164,6 +171,8 @@ enum Message {
     UpdateChecked(Option<std::sync::Arc<update::Staged>>, bool),
     /// The user chose to restart into the staged update.
     InstallUpdate,
+    /// The user flipped "Open at login", in the window or the tray menu.
+    ToggleLogin,
     /// The user picked an item from the tray menu.
     Tray(tray::Action),
     /// The user closed the window: hide it instead of quitting.
@@ -218,9 +227,12 @@ impl App {
                 tray: None,
                 update: None,
                 checking: false,
+                login: false,
+                login_error: None,
             };
             return (app, preview::shoot());
         }
+        login::apply_default(&store_dir());
         let (granted_listen, granted_post) = permissions();
         let screen = if granted_listen && granted_post {
             Screen::Starting
@@ -243,6 +255,8 @@ impl App {
             tray: None,
             update: None,
             checking: false,
+            login: login::is_enabled(),
+            login_error: None,
         };
         let theme = iced::system::theme().map(Message::Theme);
         let theme = Task::batch([
@@ -319,7 +333,7 @@ impl App {
                     Screen::Running { state, .. } => Some(state),
                     _ => None,
                 };
-                match tray::Tray::new(state) {
+                match tray::Tray::new(state, self.login) {
                     Ok(tray) => self.tray = Some(tray),
                     // Without a tray the window still works; closing it simply quits no more.
                     Err(e) => eprintln!("overdesk: tray icon unavailable: {e}"),
@@ -373,6 +387,24 @@ impl App {
                             self.update = None;
                         }
                     }
+                }
+            }
+            Message::Tray(tray::Action::ToggleLogin) => return Task::done(Message::ToggleLogin),
+            Message::ToggleLogin => {
+                match login::set(!self.login) {
+                    Ok(()) => {
+                        self.login = !self.login;
+                        self.login_error = None;
+                    }
+                    Err(e) => {
+                        eprintln!("overdesk: open at login not changed: {e}");
+                        self.login_error =
+                            Some("Couldn't change that. Overdesk isn't allowed to edit your login items.".into());
+                    }
+                }
+                // The menu flips its own tick on click; make it match what really happened.
+                if let Some(tray) = &self.tray {
+                    tray.set_login(self.login);
                 }
             }
             Message::Tray(tray::Action::Disconnect) => self.send(Command::Disconnect),
@@ -777,7 +809,20 @@ impl App {
                 .align_y(Alignment::Center),
             );
         }
-        page.into()
+        // Quiet and last: a setting, not part of pairing.
+        let mut settings = row![
+            toggler(self.login)
+                .label("Open at login")
+                .text_size(13)
+                .size(16)
+                .on_toggle(|_| Message::ToggleLogin)
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
+        if let Some(e) = &self.login_error {
+            settings = settings.push(text(e.as_str()).size(13).style(muted));
+        }
+        page.push(Space::new().height(8)).push(settings).into()
     }
 }
 

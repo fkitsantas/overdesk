@@ -7,7 +7,7 @@ use iced::futures::SinkExt;
 use overdesk_core::engine::Mode;
 use overdesk_proto::Os;
 use overdeskd::controller::{AppState, Phase};
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 /// The monochrome template glyph, 36x36 for Retina menu bars, rendered from
@@ -24,6 +24,8 @@ const SHOW: &str = "show";
 const DISCONNECT: &str = "disconnect";
 /// Menu item id of "Check for updates".
 const UPDATES: &str = "updates";
+/// Menu item id of "Open at login".
+const LOGIN: &str = "login";
 /// Menu item id of "Quit Overdesk".
 const QUIT: &str = "quit";
 
@@ -36,6 +38,8 @@ pub enum Action {
     Disconnect,
     /// Look for an update now.
     CheckUpdates,
+    /// Flip "Open at login".
+    ToggleLogin,
     /// Disconnect if needed and exit.
     Quit,
 }
@@ -50,14 +54,17 @@ pub struct Tray {
     status: MenuItem,
     /// "Disconnect", enabled only while connected.
     disconnect: MenuItem,
+    /// The checkable "Open at login".
+    login: CheckMenuItem,
 }
 
 impl Tray {
     /// Creates the icon and its menu, showing `state`. Must run on the main thread once
     /// the event loop is up (macOS requirement).
-    pub fn new(state: Option<&AppState>) -> Result<Self, String> {
+    pub fn new(state: Option<&AppState>, login: bool) -> Result<Self, String> {
         let status = MenuItem::new("Not connected", false, None);
         let disconnect = MenuItem::with_id(DISCONNECT, "Disconnect", false, None);
+        let login = CheckMenuItem::with_id(LOGIN, "Open at login", true, login, None);
         let menu = Menu::with_items(&[
             &status,
             &PredefinedMenuItem::separator(),
@@ -65,6 +72,7 @@ impl Tray {
             &disconnect,
             &PredefinedMenuItem::separator(),
             &MenuItem::with_id(UPDATES, "Check for updates", true, None),
+            &login,
             &MenuItem::with_id(QUIT, "Quit Overdesk", true, None),
         ])
         .map_err(|e| e.to_string())?;
@@ -82,11 +90,17 @@ impl Tray {
             icon,
             status,
             disconnect,
+            login,
         };
         if let Some(state) = state {
             tray.sync(state);
         }
         Ok(tray)
+    }
+
+    /// Ticks or clears "Open at login" to match the real setting.
+    pub fn set_login(&self, on: bool) {
+        self.login.set_checked(on);
     }
 
     /// Reflects the controller's state in the status line, tooltip and Disconnect item.
@@ -141,6 +155,7 @@ pub fn actions() -> impl iced::futures::Stream<Item = Action> {
                 SHOW => Action::Show,
                 DISCONNECT => Action::Disconnect,
                 UPDATES => Action::CheckUpdates,
+                LOGIN => Action::ToggleLogin,
                 QUIT => Action::Quit,
                 _ => continue,
             };

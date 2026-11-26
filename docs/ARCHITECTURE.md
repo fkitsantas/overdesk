@@ -145,7 +145,7 @@ managed corporate laptops.
   to `Program Files`, `/Library` or `HKLM`. Settings and keys live under the user's
   profile (already done: `~/Library/Application Support/Overdesk` on macOS,
   `%APPDATA%\Overdesk` on Windows).
-- **Start at login per-user:** `SMAppService` login item on macOS, the `HKCU\…\Run`
+- **Start at login per-user:** a user-owned LaunchAgent in `~/Library/LaunchAgents` on macOS (`SMAppService` once Developer ID signing lands), the `HKCU\…\Run`
   key on Windows.
 - **Input access without admin:**
   - On Windows, low-level hooks and `SendInput` work as a standard user. Windows won't let
@@ -194,6 +194,6 @@ managed corporate laptops.
 | Pairing exchange (commit-reveal, 6-digit code) | ✅ |
 | QUIC lanes: mutual TLS 1.3, control stream, motion datagrams | ✅ |
 | Saving device keys to disk, daemon | ✅ |
-| LAN discovery (mDNS) | 🔜 |
-| Per-user installers and signed self-update (§8) | 🔜 |
-| Platform adapters | 🔜 |
+| LAN discovery (mDNS) | ✅ |
+| Per-user installers and signed self-update (§8) | ✅ built; install test pending |
+| Platform adapters | ✅ macOS (hand-tested), ✅ Windows (built, untested on hardware), 🔜 Linux |
