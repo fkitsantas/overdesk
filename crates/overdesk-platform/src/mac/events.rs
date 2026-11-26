@@ -2,7 +2,9 @@
 //! Pure Quartz event semantics: what makes injected input indistinguishable from real
 //! Apple hardware. Constants come from CGEventTypes.h and IOLLEvent.h.
 
-use overdesk_proto::{Button, Phase};
+use overdesk_proto::{Button, PAGE_APPLE_TOP_CASE, Phase};
+
+use super::keymap::vk_to_code;
 
 // Generic CGEventFlags.
 pub const FLAG_SHIFT: u64 = 0x0002_0000;
@@ -20,6 +22,23 @@ pub const DEV_LALT: u64 = 0x0020;
 pub const DEV_RALT: u64 = 0x0040;
 pub const DEV_RCTL: u64 = 0x2000;
 
+const CODE_CAPS: u32 = 0x39;
+const CODE_FN: u32 = PAGE_APPLE_TOP_CASE | 0x03;
+
+/// `(overdesk code, bits that mean "this exact key is down", generic flag)`.
+const MODIFIERS: &[(u32, u64, u64)] = &[
+    (0xE0, DEV_LCTL, FLAG_CONTROL),
+    (0xE1, DEV_LSHIFT, FLAG_SHIFT),
+    (0xE2, DEV_LALT, FLAG_OPTION),
+    (0xE3, DEV_LCMD, FLAG_COMMAND),
+    (0xE4, DEV_RCTL, FLAG_CONTROL),
+    (0xE5, DEV_RSHIFT, FLAG_SHIFT),
+    (0xE6, DEV_RALT, FLAG_OPTION),
+    (0xE7, DEV_RCMD, FLAG_COMMAND),
+    // Fn has no side bit; its generic flag is the key state.
+    (CODE_FN, FLAG_FN, FLAG_FN),
+];
+
 /// A modifier transition decoded from a `kCGEventFlagsChanged` event.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ModChange {
@@ -31,24 +50,56 @@ pub enum ModChange {
 
 /// Decodes which modifier changed. macOS never sends key down/up for modifiers,
 /// only `flagsChanged` with the key's `kVK` and the new flag word.
-pub fn modifier_change(_vk: u16, _flags: u64) -> Option<ModChange> {
-    todo!()
+pub fn modifier_change(vk: u16, flags: u64) -> Option<ModChange> {
+    let code = vk_to_code(vk)?;
+    if code == CODE_CAPS {
+        return Some(ModChange::Toggle(code));
+    }
+    let &(_, down_bit, _) = MODIFIERS.iter().find(|m| m.0 == code)?;
+    Some(if flags & down_bit != 0 {
+        ModChange::Press(code)
+    } else {
+        ModChange::Release(code)
+    })
 }
 
 /// Flag word an injected event must carry while `held` codes are down;
 /// without it, Cmd+C typed from another computer arrives as a bare "c".
-pub fn flags_for(_held: &[u32]) -> u64 {
-    todo!()
+pub fn flags_for(held: &[u32]) -> u64 {
+    MODIFIERS
+        .iter()
+        .filter(|m| held.contains(&m.0))
+        .fold(0, |f, m| f | m.1 | m.2)
 }
 
 /// `kCGScrollWheelEventScrollPhase` + `kCGScrollWheelEventMomentumPhase` -> `Phase`.
-pub fn phase_from_cg(_scroll: i64, _momentum: i64) -> Phase {
-    todo!()
+pub fn phase_from_cg(scroll: i64, momentum: i64) -> Phase {
+    match (scroll, momentum) {
+        (_, 1) => Phase::MomentumBegan,
+        (_, 2) => Phase::Momentum,
+        (_, 3) => Phase::MomentumEnded,
+        (1, _) => Phase::Began,
+        (2, _) => Phase::Changed,
+        (4, _) => Phase::Ended,
+        (8, _) => Phase::Cancelled,
+        (128, _) => Phase::MayBegin,
+        _ => Phase::None,
+    }
 }
 
 /// Inverse of [`phase_from_cg`].
-pub fn phase_to_cg(_p: Phase) -> (i64, i64) {
-    todo!()
+pub fn phase_to_cg(p: Phase) -> (i64, i64) {
+    match p {
+        Phase::None => (0, 0),
+        Phase::Began => (1, 0),
+        Phase::Changed => (2, 0),
+        Phase::Ended => (4, 0),
+        Phase::Cancelled => (8, 0),
+        Phase::MayBegin => (128, 0),
+        Phase::MomentumBegan => (0, 1),
+        Phase::Momentum => (0, 2),
+        Phase::MomentumEnded => (0, 3),
+    }
 }
 
 /// Event type for an injected pointer move. macOS apps only see drags
@@ -61,8 +112,16 @@ pub enum MoveKind {
     OtherDragged,
 }
 
-pub fn move_kind(_held: &[Button]) -> MoveKind {
-    todo!()
+pub fn move_kind(held: &[Button]) -> MoveKind {
+    if held.contains(&Button::Left) {
+        MoveKind::LeftDragged
+    } else if held.contains(&Button::Right) {
+        MoveKind::RightDragged
+    } else if held.is_empty() {
+        MoveKind::Moved
+    } else {
+        MoveKind::OtherDragged
+    }
 }
 
 /// Max distance in points between clicks of one multi-click, like real hardware.
@@ -77,8 +136,20 @@ pub struct ClickCounter {
 
 impl ClickCounter {
     /// Records a press at `t_ms`; returns its click count (1 = single, 2 = double, ...).
-    pub fn press(&mut self, _button: Button, _t_ms: u64, _x: i32, _y: i32, _interval_ms: u64) -> i64 {
-        todo!()
+    pub fn press(&mut self, button: Button, t_ms: u64, x: i32, y: i32, interval_ms: u64) -> i64 {
+        let count = match self.last {
+            Some((b, t, lx, ly, n))
+                if b == button
+                    && t_ms.saturating_sub(t) <= interval_ms
+                    && (x - lx).abs() <= CLICK_SLOP
+                    && (y - ly).abs() <= CLICK_SLOP =>
+            {
+                n + 1
+            }
+            _ => 1,
+        };
+        self.last = Some((button, t_ms, x, y, count));
+        count
     }
 }
 
