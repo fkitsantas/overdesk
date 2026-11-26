@@ -43,7 +43,7 @@ pub fn state(which: &str) -> (AppState, Option<(bool, bool)>) {
         os: Os::Windows,
     }];
     let mut desk = desk;
-    if which == "three" {
+    if which == "arrange" || which == "three" {
         // A Linux laptop below the MacBook, as a third computer.
         peers.push(PeerView {
             id: third,
@@ -69,7 +69,7 @@ pub fn state(which: &str) -> (AppState, Option<(bool, bool)>) {
         "connecting" => (Phase::Connecting { address: "192.168.1.50:24801".parse().unwrap() }, vec![], None),
         "pairing" => (Phase::Pairing { peer: "192.168.1.50".into(), code: 382930 }, vec![], None),
         "local" => (connected(Mode::Local), desk, None),
-        "three" => (connected(Mode::Driving(peer)), desk, None),
+        "three" | "arrange" => (connected(Mode::Driving(peer)), desk, None),
         "driving" => (connected(Mode::Driving(peer)), desk, None),
         "driven" => (connected(Mode::Driven(peer)), desk, None),
         "lost" => (Phase::Lost { peer: "DESKTOP-7Q2K4LM".into() }, vec![], None),
@@ -83,9 +83,14 @@ pub fn state(which: &str) -> (AppState, Option<(bool, bool)>) {
         phase,
         desk,
         // The cursor is on the peer only while this device drives it.
-        focus: matches!(which, "local" | "driving" | "driven" | "three")
-            .then_some(if matches!(which, "driving" | "three") { peer } else { me }),
-        can_arrange: false,
+        focus: matches!(which, "local" | "driving" | "driven" | "three" | "arrange").then_some(
+            if matches!(which, "driving" | "three" | "arrange") {
+                peer
+            } else {
+                me
+            },
+        ),
+        can_arrange: which == "arrange",
         pairing_open: which == "pairing-open",
         nearby: if which == "idle" {
             vec![
@@ -109,6 +114,14 @@ pub fn state(which: &str) -> (AppState, Option<(bool, bool)>) {
         },
     };
     (state, perms)
+}
+
+/// The licence row to preview for `which`, if it is a licence state.
+pub fn edition(which: &str) -> Option<crate::Edition> {
+    matches!(which, "licence" | "licence-error" | "licensed").then(|| crate::Edition {
+        licensed_to: (which == "licensed").then(|| "ada@example.org".into()),
+        activate: |_| Err("That key isn't valid. Check it and try again.".into()),
+    })
 }
 
 /// Light, or dark when `OVERDESK_PREVIEW_THEME=dark`.

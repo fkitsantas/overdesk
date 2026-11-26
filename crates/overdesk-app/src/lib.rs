@@ -28,7 +28,7 @@ use overdesk_core::engine::Mode;
 use overdesk_net::session::Me;
 use overdesk_proto::Os;
 use overdeskd::Side;
-use overdeskd::controller::{self, AppState, Command, Phase, StartError};
+use overdeskd::controller::{self, AppState, Command, Phase, Placement, StartError};
 use overdeskd::native::NativePlatform;
 use tokio::sync::{mpsc, watch};
 
@@ -65,6 +65,26 @@ pub type SpawnFuture = Pin<
 
 /// The controller starter chosen by the caller of [`run`], read when the app boots.
 static SPAWN: OnceLock<Spawn> = OnceLock::new();
+
+/// What the build knows about the user's licence. The open app has no licence UI; the
+/// private build supplies the checking, so no key logic lives here.
+#[derive(Debug, Clone)]
+pub struct Edition {
+    /// "Overdesk Pro" when a valid key is active, else `None` (Free): the licence email.
+    pub licensed_to: Option<String>,
+    /// Checks and stores a key; `Ok(email)` on success, `Err` with a sentence for the user.
+    pub activate: fn(&str) -> Result<String, String>,
+}
+
+/// The edition chosen by the caller of [`run_with`]; absent for Free.
+static EDITION: OnceLock<Edition> = OnceLock::new();
+
+/// Opens the window as [`run`] does, with a licence row for `edition`. The controller is
+/// chosen at start-up, so a newly activated key applies after a restart.
+pub fn run_with(spawn: Spawn, edition: Edition) -> iced::Result {
+    let _ = EDITION.set(edition);
+    run(spawn)
+}
 
 /// Opens the window: Inter as the default font, the brand theme, and the controller's
 /// state as a subscription. `spawn` starts the controller, so another build can bring its own.
@@ -162,6 +182,12 @@ struct App {
     login: bool,
     /// Why the last change to "Open at login" failed, until the next attempt.
     login_error: Option<String>,
+    /// The licence key being typed.
+    key: String,
+    /// Why the last activation failed, until the next attempt.
+    key_error: Option<String>,
+    /// The licence email, once a key was activated in this run (applies after a restart).
+    activated: Option<String>,
 }
 
 /// Everything that can change the app: controller events, system events and user input.
@@ -210,6 +236,10 @@ enum Message {
     OpenSettings(Permission),
     /// Re-check the macOS permissions while the permissions screen is shown.
     PollPermissions,
+    /// The licence key field changed.
+    Key(String),
+    /// The user asked to activate the typed key.
+    Activate,
     /// Restart the app so newly granted permissions take effect.
     Relaunch,
     /// The preview screenshot is ready to save.
@@ -224,6 +254,9 @@ impl App {
         #[cfg(feature = "preview")]
         if let Ok(which) = std::env::var("OVERDESK_PREVIEW") {
             let (state, perms) = preview::state(&which);
+            if let Some(edition) = preview::edition(&which) {
+                let _ = EDITION.set(edition);
+            }
             let screen = match perms {
                 Some((input_monitoring, accessibility)) => Screen::Permissions {
                     input_monitoring,
@@ -248,6 +281,9 @@ impl App {
                 checking: false,
                 login: false,
                 login_error: None,
+                key: String::new(),
+                key_error: (which == "licence-error").then(|| "That key isn't valid. Check it and try again.".into()),
+                activated: None,
             };
             return (app, preview::shoot());
         }
@@ -276,6 +312,9 @@ impl App {
             checking: false,
             login: login::is_enabled(),
             login_error: None,
+            key: String::new(),
+            key_error: None,
+            activated: None,
         };
         let theme = iced::system::theme().map(Message::Theme);
         // The window being up for a while counts as healthy, whichever screen it shows
@@ -457,6 +496,19 @@ impl App {
                 self.answered |= matches!(c, Command::AnswerCode(_));
                 self.send(c);
             }
+            Message::Key(k) => self.key = k,
+            Message::Activate => {
+                if let Some(edition) = EDITION.get() {
+                    match (edition.activate)(self.key.trim()) {
+                        Ok(email) => {
+                            self.activated = Some(email);
+                            self.key.clear();
+                            self.key_error = None;
+                        }
+                        Err(e) => self.key_error = Some(e),
+                    }
+                }
+            }
             Message::OpenSettings(p) => open_settings(p),
             Message::Relaunch => relaunch(),
             #[cfg(feature = "preview")]
@@ -633,6 +685,38 @@ impl App {
                     Mode::Driven(_) => format!("{peer} is controlling {me}."),
                     _ => format!("Move the cursor across the screen edge to use {peer}."),
                 };
+                // shortcut: buttons, not drag-and-drop on the map; drag when the map can hit-test.
+                let anchor = state.desk.iter().find(|s| s.me).map(|s| s.id);
+                let arrange = column(
+                    peers
+                        .iter()
+                        .filter(|_| state.can_arrange)
+                        .filter_map(|p| anchor.map(|a| (p, a)))
+                        .map(|(p, a)| {
+                            let at = |label: &'static str, side| {
+                                button(text(label).size(13))
+                                    .padding([4, 10])
+                                    .style(style::secondary)
+                                    .on_press(Message::Send(Command::Place {
+                                        peer: p.id,
+                                        anchor: a,
+                                        side,
+                                    }))
+                            };
+                            row![
+                                text(format!("Place {}", p.name)).size(13).style(muted),
+                                Space::new().width(Fill),
+                                at("Left", Placement::Left),
+                                at("Right", Placement::Right),
+                                at("Above", Placement::Above),
+                                at("Below", Placement::Below),
+                            ]
+                            .spacing(6)
+                            .align_y(Alignment::Center)
+                            .into()
+                        }),
+                )
+                .spacing(4);
                 column![
                     container(
                         canvas(desk::DeskMap {
@@ -642,14 +726,16 @@ impl App {
                             phase: self.phase
                         })
                         .width(Fill)
-                        .height(250)
+                        .height(if state.can_arrange { 170 } else { 250 }) // leaves room for the arrange rows
                     )
                     .padding(6)
                     .style(style::panel),
                     Space::new().height(16),
                     text(status).size(17).font(bold()),
                     text(hint).style(muted),
-                    Space::new().height(18),
+                    Space::new().height(12),
+                    arrange,
+                    Space::new().height(6),
                     row![
                         column![
                             text(peer).font(bold()),
@@ -847,7 +933,58 @@ impl App {
         if let Some(e) = &self.login_error {
             settings = settings.push(text(e.as_str()).size(13).style(muted));
         }
-        page.push(Space::new().height(8)).push(settings).into()
+        page = page.push(Space::new().height(8)).push(settings);
+        if let Some(edition) = EDITION.get() {
+            page = page.push(self.licence_view(edition));
+        }
+        page.into()
+    }
+}
+
+impl App {
+    /// The "Overdesk Pro" row: the licensee, a restart prompt after activating, or a key field.
+    fn licence_view<'a>(&'a self, edition: &'a Edition) -> Element<'a, Message> {
+        if let Some(email) = &edition.licensed_to {
+            return text(format!("Pro, licensed to {email}")).size(13).style(muted).into();
+        }
+        if let Some(email) = &self.activated {
+            return row![
+                text(format!("Pro, licensed to {email}")).size(13).style(muted),
+                button(text("Restart to finish").size(13))
+                    .padding([6, 12])
+                    .style(style::primary)
+                    .on_press(Message::Relaunch),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into();
+        }
+        let go = button(text("Activate").size(13))
+            .padding([6, 12])
+            .style(style::secondary);
+        let go = if self.key.trim().is_empty() {
+            go
+        } else {
+            go.on_press(Message::Activate)
+        };
+        let mut licence = column![
+            row![
+                text_input("Licence key", &self.key)
+                    .on_input(Message::Key)
+                    .on_submit(Message::Activate)
+                    .size(13)
+                    .padding(8)
+                    .style(style::field),
+                go
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+        ]
+        .spacing(4);
+        if let Some(e) = &self.key_error {
+            licence = licence.push(text(e.as_str()).size(13).style(muted));
+        }
+        licence.into()
     }
 }
 

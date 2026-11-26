@@ -142,6 +142,20 @@ pub struct AppState {
     pub nearby: Vec<NearbyDevice>,
 }
 
+/// Which edge of another computer's screen a screen is placed against. Unlike [`Side`],
+/// which a two-computer session needs, it can also be above or below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// Left of the anchor's screen.
+    Left,
+    /// Right of the anchor's screen.
+    Right,
+    /// Above the anchor's screen.
+    Above,
+    /// Below the anchor's screen.
+    Below,
+}
+
 /// What the UI asks the controller to do. Commands are the controller's only input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -171,7 +185,7 @@ pub enum Command {
         /// The device whose screen it is placed against.
         anchor: PeerId,
         /// Which side of the anchor's screen it goes on.
-        side: Side,
+        side: Placement,
     },
 }
 

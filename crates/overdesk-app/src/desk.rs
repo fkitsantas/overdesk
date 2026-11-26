@@ -86,30 +86,39 @@ impl<Message> Program<Message> for DeskMap<'_> {
                     .with_color(if on { TEAL } else { hairline(theme) })
                     .with_width(if on { 2.0 } else { 1.0 }),
             );
-            frame.fill_text(Text {
-                content: s.name.clone(),
-                position: Point::new(r.x + 14.0, r.y + 14.0),
-                color: ink(theme),
-                size: 14.0.into(),
-                font: iced::Font {
-                    weight: iced::font::Weight::Semibold,
-                    ..iced::Font::with_name("Inter")
-                },
-                align_y: alignment::Vertical::Top,
-                ..Text::default()
-            });
-            frame.fill_text(Text {
-                content: if s.me {
-                    "This device".into()
+            // Labels shrink, shorten or drop so they always stay inside their screen.
+            let pad = (r.width * 0.08).clamp(6.0, 14.0);
+            let room = r.width - 2.0 * pad;
+            let name_size = if r.height >= 44.0 { 14.0 } else { 11.0 };
+            if r.height >= name_size + 2.0 * 6.0 {
+                frame.fill_text(Text {
+                    content: fit(&s.name, room, name_size),
+                    position: Point::new(r.x + pad, r.y + pad.min(14.0)),
+                    color: ink(theme),
+                    size: name_size.into(),
+                    font: iced::Font {
+                        weight: iced::font::Weight::Semibold,
+                        ..iced::Font::with_name("Inter")
+                    },
+                    align_y: alignment::Vertical::Top,
+                    ..Text::default()
+                });
+            }
+            if r.height >= 58.0 {
+                let detail = if s.me {
+                    "This device".to_string()
                 } else {
                     format!("{} × {}", s.w, s.h)
-                },
-                position: Point::new(r.x + 14.0, r.y + 34.0),
-                color: muted(theme),
-                size: 12.0.into(),
-                align_y: alignment::Vertical::Top,
-                ..Text::default()
-            });
+                };
+                frame.fill_text(Text {
+                    content: fit(&detail, room, 12.0),
+                    position: Point::new(r.x + pad, r.y + pad.min(14.0) + 20.0),
+                    color: muted(theme),
+                    size: 12.0.into(),
+                    align_y: alignment::Vertical::Top,
+                    ..Text::default()
+                });
+            }
         }
 
         // A ribbon across every edge two screens share.
@@ -227,6 +236,20 @@ fn layout(screens: &[ScreenView], width: f32, height: f32) -> Option<Vec<Rectang
     )
 }
 
+/// `text` shortened with an ellipsis to fit `width` pixels at font `size`.
+// shortcut: estimates Inter's average glyph width (0.6 em) instead of measuring; measure if labels look cut short.
+fn fit(text: &str, width: f32, size: f32) -> String {
+    let max = (width / (size * 0.6)).floor().max(0.0) as usize;
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let keep = max.saturating_sub(1);
+    if keep == 0 {
+        return String::new();
+    }
+    text.chars().take(keep).collect::<String>() + "…"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +283,13 @@ mod tests {
         assert!((r[1].x - (r[0].x + r[0].width) - GAP).abs() < 0.01);
         assert!(r[0].x >= PAD - 0.01 && r[1].x + r[1].width <= 400.0 - PAD + 0.01);
         assert!(layout(&[screen(0, 0, 0, 10)], 400.0, 300.0).is_none());
+    }
+
+    #[test]
+    fn labels_are_shortened_to_fit() {
+        assert_eq!(fit("fedora", 200.0, 14.0), "fedora");
+        let short = fit("DESKTOP-7Q2K4LM", 60.0, 14.0);
+        assert!(short.ends_with('…') && short.chars().count() <= 7, "{short}");
+        assert_eq!(fit("anything", 5.0, 14.0), "");
     }
 }
