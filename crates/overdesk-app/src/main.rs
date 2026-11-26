@@ -26,10 +26,16 @@ use tokio::sync::{mpsc, watch};
 
 /// The port the controller listens on, and the one assumed when an address has none.
 const PORT: u16 = 24801;
-/// The app icon, shown large as the hero on every screen but the connected one.
-const ICON: &[u8] = include_bytes!("../../../assets/brand/app-icon-square-1024.png");
-/// The decoded icon, created once: a fresh handle per frame would re-upload the texture.
-static ICON_HANDLE: OnceLock<image::Handle> = OnceLock::new();
+/// The wordmark lockup for light backdrops, cut from `04_light_lockup.png` with its card
+/// background removed (`assets/brand/lockup-light.png`).
+const LOCKUP_LIGHT: &[u8] = include_bytes!("../../../assets/brand/lockup-light.png");
+/// The wordmark lockup for dark backdrops, cut from `05_dark_lockup.png` with its card
+/// background removed (`assets/brand/lockup-dark.png`).
+const LOCKUP_DARK: &[u8] = include_bytes!("../../../assets/brand/lockup-dark.png");
+/// Decoded light lockup, shared across frames.
+static LOCKUP_LIGHT_HANDLE: OnceLock<image::Handle> = OnceLock::new();
+/// Decoded dark lockup, shared across frames.
+static LOCKUP_DARK_HANDLE: OnceLock<image::Handle> = OnceLock::new();
 /// How far content is pushed down to clear the macOS traffic lights in the merged title bar.
 const TITLE_BAR: f32 = 30.0;
 // Inter (SIL OFL 1.1, assets/fonts/Inter-LICENSE.txt): the grotesk of the wordmark,
@@ -380,22 +386,13 @@ impl App {
                 ..
             }
         );
-        let top: Element<'_, Message> = if connected {
-            row![
-                image(icon()).width(28).height(28),
-                text("Overdesk").size(17).font(bold()),
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center)
-            .into()
-        } else {
-            container(container(image(icon()).width(HERO).height(HERO)).style(style::logo_halo(HERO as f32 * 0.225)))
-                .center_x(Fill)
-                .into()
-        };
+        // The brand lockup crowns every screen, at its native size so it reads as the logo
+        // it is: the light lockup on light backdrops, the dark lockup on dark ones.
+        let (lockup, (w, h)) = lockup(self.theme);
+        let top: Element<'_, Message> = container(image(lockup).width(w).height(h)).center_x(Fill).into();
         let page = column![top, Space::new().height(if connected { 20 } else { 22 }), body]
             .max_width(560)
-            .align_x(if connected { Alignment::Start } else { Alignment::Center });
+            .align_x(Alignment::Center);
         stack![
             canvas(backdrop::Backdrop).width(Fill).height(Fill),
             container(page)
@@ -673,12 +670,23 @@ fn subtitle<'a>(s: impl text::IntoFragment<'a>) -> iced::widget::Text<'a> {
 /// The tallest the Nearby list grows before it scrolls: two rows and their spacing.
 const NEARBY_MAX_HEIGHT: f32 = 156.0;
 
-/// The hero logo's edge length, in pixels.
-const HERO: u32 = 72;
-
-/// The decoded app icon, shared across frames.
-fn icon() -> image::Handle {
-    ICON_HANDLE.get_or_init(|| image::Handle::from_bytes(ICON)).clone()
+/// The lockup for the current theme and its native size in pixels.
+fn lockup(theme: ThemeMode) -> (image::Handle, (u32, u32)) {
+    if theme == ThemeMode::Dark {
+        (
+            LOCKUP_DARK_HANDLE
+                .get_or_init(|| image::Handle::from_bytes(LOCKUP_DARK))
+                .clone(),
+            (424, 60),
+        )
+    } else {
+        (
+            LOCKUP_LIGHT_HANDLE
+                .get_or_init(|| image::Handle::from_bytes(LOCKUP_LIGHT))
+                .clone(),
+            (430, 58),
+        )
+    }
 }
 
 /// Inter Semibold, for titles and emphasis.

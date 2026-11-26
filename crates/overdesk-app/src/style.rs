@@ -182,19 +182,3 @@ pub fn glyph(_theme: &Theme) -> container::Style {
         ..container::Style::default()
     }
 }
-
-/// The soft Indigo halo behind the hero logo, of the given corner radius.
-pub fn logo_halo(corner: f32) -> impl Fn(&Theme) -> container::Style {
-    move |theme| container::Style {
-        border: Border {
-            radius: corner.into(),
-            ..Border::default()
-        },
-        shadow: Shadow {
-            color: alpha(INDIGO, if is_dark(theme) { 0.55 } else { 0.4 }),
-            offset: Vector::new(0.0, 8.0),
-            blur_radius: 40.0,
-        },
-        ..container::Style::default()
-    }
-}
