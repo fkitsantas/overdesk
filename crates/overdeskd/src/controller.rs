@@ -803,6 +803,7 @@ mod tests {
             name: name.into(),
             os: Os::Windows,
             address: SocketAddr::from(([10, 0, 0, n], 24801)),
+            pro: false,
         }
     }
 

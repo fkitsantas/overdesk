@@ -39,6 +39,9 @@ pub struct Nearby {
     pub os: Os,
     /// Where to dial it: an IPv4 address when it has one, otherwise IPv6.
     pub address: SocketAddr,
+    /// Whether it announces Overdesk Pro (TXT `pro=1`). Unauthenticated, like the rest of the
+    /// announcement: it only chooses how the Desk is shared, never whom to trust.
+    pub pro: bool,
 }
 
 /// A change in the set of nearby devices.
@@ -135,6 +138,7 @@ fn parse(txt: &[(&str, &str)], addrs: &[IpAddr], port: u16) -> Option<Nearby> {
         name,
         os,
         address: SocketAddr::new(*ip, port),
+        pro: get("pro") == Some("1"),
     })
 }
 
@@ -150,14 +154,26 @@ impl Advertiser {
     /// Registers this device as a [`SERVICE`] instance on `port`, with TXT records `id`,
     /// `name`, `os` and `v`. Addresses are taken from the host's interfaces automatically.
     pub fn start(id: PeerId, name: &str, os: Os, port: u16) -> Result<Self, DiscoveryError> {
+        Self::start_with(id, name, os, port, &[])
+    }
+
+    /// Like [`Advertiser::start`], with `extra` TXT records appended (Overdesk Pro adds `pro=1`).
+    pub fn start_with(
+        id: PeerId,
+        name: &str,
+        os: Os,
+        port: u16,
+        extra: &[(&str, &str)],
+    ) -> Result<Self, DiscoveryError> {
         let hex = id_hex(id);
         let version = PROTOCOL_VERSION.to_string();
-        let txt = [
+        let mut txt = vec![
             ("id", hex.as_str()),
             ("name", name),
             ("os", os_str(os)),
             ("v", version.as_str()),
         ];
+        txt.extend_from_slice(extra);
         let info = ServiceInfo::new(SERVICE, &hex, &format!("{hex}.local."), "", port, &txt[..])?.enable_addr_auto();
         let fullname = info.get_fullname().to_owned();
         let daemon = ServiceDaemon::new()?;
@@ -360,5 +376,16 @@ mod tests {
                 Change::Lost(_) => {}
             }
         }
+    }
+
+    #[test]
+    fn pro_is_read_only_from_an_exact_flag() {
+        let mut t = txt(HEX, "n", "linux", "1");
+        assert!(!parse(&t, &[V4], 1).unwrap().pro, "absent means Free");
+        t.push(("pro", "yes"));
+        assert!(!parse(&t, &[V4], 1).unwrap().pro);
+        t.pop();
+        t.push(("pro", "1"));
+        assert!(parse(&t, &[V4], 1).unwrap().pro);
     }
 }
