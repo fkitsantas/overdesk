@@ -88,7 +88,8 @@ costs nothing until you use it.
 | 1 | Two-lane wire protocol and core logic: screen layout, edge switching, held keys, ⌘↔Ctrl remap | ✅ Done |
 | 2 | **macOS** capture and injection with native Magic Mouse / trackpad / keyboard feel | ✅ Built and hand-tested ([evidence](docs/tdd/macos-adapter.tdd.md)) |
 | 3 | QUIC lanes, 6-digit pairing, replicated Desk state, latency benchmark | ✅ Built and tested over loopback |
-| 3b | LAN discovery, saving device keys to disk, daemon that wires it all together | ⏳ Next |
+| 3b | `overdeskd` daemon: Desk engine, saved pairings, failsafe escape chord. Hand-tested on a Mac ([evidence](docs/tdd/daemon.tdd.md)) | ✅ Done |
+| 3c | LAN discovery (no typing IP addresses) | 🔜 |
 | 4 | **Windows** capture and injection | 🔜 |
 | 5 | Desktop app: Tauri 2 + Svelte 5, drag-to-arrange screens, tray icon | 🔜 |
 | 6 | Linux (X11, then Wayland through libei) | 🔜 |
@@ -110,6 +111,7 @@ flowchart LR
 | [`overdesk-proto`](crates/overdesk-proto) | Wire types for both lanes, length-prefixed control frames (1 MiB cap), wrap-safe motion sequencing |
 | [`overdesk-core`](crates/overdesk-core) | Pure logic: layout validation, cursor focus across screen edges, held-key release, ⌘↔Ctrl remap |
 | [`overdesk-net`](crates/overdesk-net) | QUIC transport: mutual TLS 1.3 with device certificates, control stream and motion datagrams, 6-digit commit-reveal pairing, `Hello` identity checks |
+| [`overdeskd`](crates/overdeskd) | The daemon: wires capture, network and injection to the Desk engine (Local, Driving or Driven), pairing in the terminal |
 | [`overdesk-platform`](crates/overdesk-platform) | OS adapters. macOS: Quartz event tap and injection with real modifier flags, drag events, double-click counts and scroll momentum phases |
 
 Read the full design in **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
@@ -131,6 +133,19 @@ On a Mac, try the input probe. First grant your terminal **Input Monitoring** an
 cargo run -p overdesk-platform --example mac_probe -- listen   # prints your input for 10 s
 cargo run -p overdesk-platform --example mac_probe -- inject   # draws a small square with the cursor
 ```
+
+Try the daemon on one Mac, driving a headless "PC" that prints what it would inject:
+
+```bash
+cargo build -p overdeskd
+# Terminal 1: the pretend PC (auto-confirms the pairing code)
+yes y | OVERDESK_HOME=/tmp/od-pc  ./target/debug/overdeskd listen 127.0.0.1:24801 --headless --pair
+# Terminal 2: your Mac; type y if both terminals show the same code
+OVERDESK_HOME=/tmp/od-mac ./target/debug/overdeskd connect 127.0.0.1:24801 --pair --exit-after 60
+```
+
+Push the cursor off your screen's right edge to drive the PC. Move back left, or press
+<kbd>⌃</kbd><kbd>⌥</kbd><kbd>⌘</kbd><kbd>⎋</kbd>, to return.
 
 Measure motion-lane latency over loopback QUIC:
 
