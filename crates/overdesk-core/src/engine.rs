@@ -670,6 +670,8 @@ mod tests {
         }));
         assert_eq!(e.mode(), Mode::Local);
 
+        assert!(a.contains(&Action::InjectMove { x: 720, y: 450 }), "escape lands mid-screen, not on the edge");
+
         let mut e = driving();
         assert!(e.handle(Event::PeerLost(PC), 1).contains(&Action::Swallow(false)));
         assert_eq!(e.mode(), Mode::Local);
