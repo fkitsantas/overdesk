@@ -35,12 +35,26 @@ impl<Message> Program<Message> for DeskMap<'_> {
         }
         let min_x = self.screens.iter().map(|s| s.x).min().unwrap_or(0) as f32;
         let min_y = self.screens.iter().map(|s| s.y).min().unwrap_or(0) as f32;
-        let max_x = self.screens.iter().map(|s| s.x as f32 + s.w as f32).fold(0.0, f32::max);
-        let max_y = self.screens.iter().map(|s| s.y as f32 + s.h as f32).fold(0.0, f32::max);
+        let max_x = self
+            .screens
+            .iter()
+            .map(|s| s.x as f32 + s.w as f32)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let max_y = self
+            .screens
+            .iter()
+            .map(|s| s.y as f32 + s.h as f32)
+            .fold(f32::NEG_INFINITY, f32::max);
+        // A degenerate Desk has nothing to scale; draw nothing rather than divide by zero.
+        if max_x - min_x <= 0.0 || max_y - min_y <= 0.0 {
+            return vec![frame.into_geometry()];
+        }
         let gaps = (self.screens.len() - 1) as f32 * GAP;
         // Fit the whole Desk inside the padded bounds, keeping the screens' proportions.
-        let scale =
-            ((bounds.width - 2.0 * PAD - gaps) / (max_x - min_x)).min((bounds.height - 2.0 * PAD) / (max_y - min_y));
+        // A canvas too small for the padding and gaps clamps to zero instead of going negative.
+        let scale = ((bounds.width - 2.0 * PAD - gaps) / (max_x - min_x))
+            .min((bounds.height - 2.0 * PAD) / (max_y - min_y))
+            .max(0.0);
         let drawn_w = (max_x - min_x) * scale + gaps;
         let ox = (bounds.width - drawn_w) / 2.0;
         let oy = (bounds.height - (max_y - min_y) * scale) / 2.0;
@@ -102,7 +116,7 @@ impl<Message> Program<Message> for DeskMap<'_> {
         }
 
         // The ribbon: from low in the left screen, up through the gap, into the right one.
-        if let [(a, _), (b, _), ..] = rects.as_slice() {
+        if let [(a, _), (b, sb), ..] = rects.as_slice() {
             // Starts low in the left screen and ends low in the right one, clear of the labels.
             let start = Point::new(a.x + a.width * 0.5, a.y + a.height * 0.82);
             let end = Point::new(b.x + b.width * 0.5, b.y + b.height * 0.72);
@@ -123,11 +137,8 @@ impl<Message> Program<Message> for DeskMap<'_> {
             );
             if self.mode != Mode::Local {
                 // Light flows toward whichever screen has the cursor.
-                let dir = if matches!(self.mode, Mode::Driven(_)) {
-                    -1.0
-                } else {
-                    1.0
-                };
+                // The screens are sorted left to right, so `b` is the right-hand one.
+                let dir = if sb.me == active_is_me { 1.0 } else { -1.0 };
                 frame.stroke(
                     &ribbon,
                     Stroke {

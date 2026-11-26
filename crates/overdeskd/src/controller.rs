@@ -4,6 +4,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use overdesk_core::engine::{Action, Mode};
@@ -137,6 +138,9 @@ struct Shared<P> {
     answer: Mutex<Option<oneshot::Sender<bool>>>,
     /// Until when unknown devices dialing in may pair. Closed by default.
     pairing_until: Mutex<Option<tokio::time::Instant>>,
+    /// Which session may write state. Bumped on Disconnect and whenever a session starts,
+    /// so a task that outlives its abort cannot overwrite a newer phase.
+    generation: AtomicU64,
     /// This device's identity and pinned peers.
     store: Store,
     /// Who this device is, as sent to peers.
@@ -160,14 +164,30 @@ impl<P> Shared<P> {
         self.state.send_modify(|s| s.pairing_open = until.is_some());
     }
 
-    /// Publishes a new phase and, if given, a new Desk view.
-    fn set(&self, phase: Phase, desk: Option<Vec<ScreenView>>) {
+    /// Publishes a new phase and, if given, a new Desk view, unless `generation` is stale.
+    fn set(&self, generation: u64, phase: Phase, desk: Option<Vec<ScreenView>>) {
         self.state.send_modify(|s| {
+            // Checked under the state lock, so it is atomic with `begin`.
+            if self.generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
             s.phase = phase;
             if let Some(d) = desk {
                 s.desk = d;
             }
         });
+    }
+
+    /// Invalidates every running session, publishes `phase` with an empty Desk, and
+    /// returns the new generation for the session (if any) that follows.
+    fn begin(&self, phase: Phase) -> u64 {
+        let mut generation = 0;
+        self.state.send_modify(|s| {
+            generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+            s.phase = phase;
+            s.desk = Vec::new();
+        });
+        generation
     }
 }
 
@@ -191,6 +211,7 @@ pub async fn spawn<P: Platform + Clone + Sync>(
         state,
         answer: Mutex::new(None),
         pairing_until: Mutex::new(None),
+        generation: AtomicU64::new(0),
         store,
         me: config.me,
         platform,
@@ -211,19 +232,23 @@ async fn control<P: Platform + Clone + Sync>(
     let mut active: Option<JoinHandle<()>> = None;
     // A finished handle counts as idle: the last session ended on its own.
     let busy = |a: &Option<JoinHandle<()>>| a.as_ref().is_some_and(|h| !h.is_finished());
+    // Inbound links that passed setup and the pin or pairing-window check, awaiting a claim.
+    let (claims_tx, mut claims) = mpsc::unbounded_channel::<Link>();
     loop {
         tokio::select! {
             cmd = commands.recv() => match cmd {
                 None => break,
                 Some(Command::Connect { address, side }) if !busy(&active) => {
-                    shared.set(Phase::Connecting { address }, Some(Vec::new()));
+                    let generation = shared.begin(Phase::Connecting { address });
                     // Dial inside the task: a slow peer must not block Disconnect.
                     let (node, shared) = (node.clone(), shared.clone());
                     active = Some(tokio::spawn(async move {
                         let link = node.connect(address).await;
-                        session(shared, link, side, false).await;
+                        session(shared, generation, link, side, false).await;
                     }));
                 }
+                // Already in a session: the UI only offers Connect when idle, and
+                // replacing a live session's screen with an error would hide it.
                 Some(Command::Connect { .. }) => {}
                 Some(Command::AnswerCode(matches)) => {
                     if let Some(tx) = shared.answer.lock().expect("answer lock").take() {
@@ -251,18 +276,35 @@ async fn control<P: Platform + Clone + Sync>(
                         shared.platform.swallow(false);
                         shared.platform.inject(Action::ReleaseAll);
                     }
-                    shared.set(Phase::Idle, Some(Vec::new()));
+                    shared.begin(Phase::Idle);
                 }
             },
             Some(setup) = node.accept() => {
+                // Setup and gating run untracked, so strangers, probes and stalled
+                // handshakes never make the controller busy.
+                let (shared, claims) = (shared.clone(), claims_tx.clone());
+                tokio::spawn(async move {
+                    // Inbound setup failures are never published: any LAN host can cause them.
+                    let Ok(link) = setup.await else { return };
+                    let pinned = shared.store.pins().unwrap_or_default().contains(&link.peer_fingerprint());
+                    if !pinned && !shared.pairing_allowed() {
+                        // Deny by default: no prompt, no state change, nothing to probe.
+                        link.close("not paired");
+                        return;
+                    }
+                    let _ = claims.send(link);
+                });
+            }
+            Some(link) = claims.recv() => {
                 if busy(&active) {
-                    continue; // dropping the setup refuses the connection
+                    link.close("busy");
+                    continue;
                 }
+                let generation = shared.generation.fetch_add(1, Ordering::SeqCst) + 1;
                 let shared = shared.clone();
+                // The listener's side is decided by the dialer's Desk.
                 active = Some(tokio::spawn(async move {
-                    let link = setup.await;
-                    // The listener's side is decided by the dialer's Desk.
-                    session(shared, link, Side::Right, true).await;
+                    session(shared, generation, Ok(link), Side::Right, true).await;
                 }));
             }
         }
@@ -270,16 +312,20 @@ async fn control<P: Platform + Clone + Sync>(
 }
 
 /// Pairs if needed, establishes the Desk, runs until the peer is lost.
-/// `inbound` connections from unknown devices pair only while pairing is open.
+/// `inbound` connections from unknown devices pair only while pairing is open, and
+/// all state writes are dropped once `generation` is stale.
 async fn session<P: Platform + Clone + Sync>(
     shared: Arc<Shared<P>>,
+    generation: u64,
     link: Result<Link, NetError>,
     side: Side,
     inbound: bool,
 ) {
     let mut link = match link {
         Ok(l) => l,
-        Err(e) => return shared.set(Phase::Error(format!("Couldn't connect: {e}")), None),
+        // Only dials this device made are worth an error screen.
+        Err(_) if inbound => return,
+        Err(e) => return shared.set(generation, Phase::Error(format!("Couldn't connect: {e}")), None),
     };
     let peer_fp = link.peer_fingerprint();
     // An unknown device: pairing is the only way in.
@@ -294,6 +340,7 @@ async fn session<P: Platform + Clone + Sync>(
             let (tx, rx) = oneshot::channel();
             *shared.answer.lock().expect("answer lock") = Some(tx);
             shared.set(
+                generation,
                 Phase::Pairing {
                     peer: who.clone(),
                     code,
@@ -304,18 +351,26 @@ async fn session<P: Platform + Clone + Sync>(
         };
         match pair(&mut link, confirm).await {
             Ok(fp) => {
-                shared.set_pairing(None);
+                // Close the window only if this pairing used it, not the user's own dial.
+                if inbound {
+                    shared.set_pairing(None);
+                }
                 if let Err(e) = shared.store.pin(fp) {
-                    return shared.set(Phase::Error(format!("Couldn't save the pairing: {e}")), None);
+                    return shared.set(
+                        generation,
+                        Phase::Error(format!("Couldn't save the pairing: {e}")),
+                        None,
+                    );
                 }
             }
             Err(SessionError::Declined) => {
                 return shared.set(
+                    generation,
                     Phase::Error("Pairing was cancelled on one of the devices.".into()),
                     None,
                 );
             }
-            Err(e) => return shared.set(Phase::Error(format!("Pairing failed: {e}")), None),
+            Err(e) => return shared.set(generation, Phase::Error(format!("Pairing failed: {e}")), None),
         }
     }
     // Read the pins again: pairing may have just added this peer.
@@ -323,12 +378,13 @@ async fn session<P: Platform + Clone + Sync>(
     let s = match establish(link, |fp| pins.contains(fp), &shared.me, side).await {
         Ok(s) => s,
         Err(DaemonError::Session(SessionError::Net(e))) => {
-            return shared.set(Phase::Error(format!("Connection dropped: {e}")), None);
+            return shared.set(generation, Phase::Error(format!("Connection dropped: {e}")), None);
         }
-        Err(e) => return shared.set(Phase::Error(format!("Couldn't set up the Desk: {e}")), None),
+        Err(e) => return shared.set(generation, Phase::Error(format!("Couldn't set up the Desk: {e}")), None),
     };
     let (peer, peer_os) = (s.peer_name.clone(), s.peer_os);
     shared.set(
+        generation,
         Phase::Connected {
             peer: peer.clone(),
             peer_os,
@@ -339,6 +395,9 @@ async fn session<P: Platform + Clone + Sync>(
     let watcher = shared.clone();
     let on_mode = move |mode: Mode| {
         watcher.state.send_modify(|st| {
+            if watcher.generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
             // Mode changes only patch a running session; a later phase must never be overwritten.
             if let Phase::Connected { mode: m, .. } = &mut st.phase {
                 *m = mode;
@@ -346,7 +405,7 @@ async fn session<P: Platform + Clone + Sync>(
         })
     };
     run(s, shared.platform.capture(), shared.platform.clone(), on_mode).await;
-    shared.set(Phase::Lost { peer }, Some(Vec::new()));
+    shared.set(generation, Phase::Lost { peer }, Some(Vec::new()));
 }
 
 /// Turns the session's Desk into screens named for people: this device's name for its

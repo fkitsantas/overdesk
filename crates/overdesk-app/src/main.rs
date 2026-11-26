@@ -93,6 +93,9 @@ struct App {
     side: Side,
     /// The ribbon animation's position, 0.0..1.0.
     phase: f32,
+    /// Whether the user has answered the pairing code and is waiting for the peer.
+    /// Reset whenever the phase leaves [`Phase::Pairing`].
+    answered: bool,
 }
 
 /// Everything that can change the app: controller events, system events and user input.
@@ -116,6 +119,8 @@ enum Message {
     Send(Command),
     /// Open System Settings at the pane for a permission.
     OpenSettings(Permission),
+    /// Re-check the macOS permissions while the permissions screen is shown.
+    PollPermissions,
     /// Restart the app so newly granted permissions take effect.
     Relaunch,
     /// The preview screenshot is ready to save.
@@ -146,6 +151,7 @@ impl App {
                 address: String::new(),
                 side: Side::Right,
                 phase: 0.3,
+                answered: false,
             };
             return (app, preview::shoot());
         }
@@ -165,6 +171,7 @@ impl App {
             address: String::new(),
             side: Side::Right,
             phase: 0.0,
+            answered: false,
         };
         let theme = iced::system::theme().map(Message::Theme);
         (
@@ -183,8 +190,25 @@ impl App {
             Message::Started(Ok((commands, state))) => self.screen = Screen::Running { commands, state },
             Message::Started(Err(e)) => self.screen = Screen::Failed(e),
             Message::State(new) => {
+                if !matches!(new.phase, Phase::Pairing { .. }) {
+                    self.answered = false;
+                }
                 if let Screen::Running { state, .. } = &mut self.screen {
                     *state = new;
+                }
+            }
+            Message::PollPermissions => {
+                if let Screen::Permissions {
+                    input_monitoring,
+                    accessibility,
+                } = &mut self.screen
+                {
+                    (*input_monitoring, *accessibility) = permissions();
+                    if *input_monitoring && *accessibility {
+                        // Both granted: start the controller as `boot` does, no relaunch needed.
+                        self.screen = Screen::Starting;
+                        return Task::perform(start(), Message::Started);
+                    }
                 }
             }
             Message::Theme(mode) => self.theme = mode,
@@ -199,7 +223,10 @@ impl App {
                     });
                 }
             }
-            Message::Send(c) => self.send(c),
+            Message::Send(c) => {
+                self.answered |= matches!(c, Command::AnswerCode(_));
+                self.send(c);
+            }
             Message::OpenSettings(p) => open_settings(p),
             Message::Relaunch => relaunch(),
             #[cfg(feature = "preview")]
@@ -223,6 +250,10 @@ impl App {
             return Subscription::none();
         }
         let mut subs = vec![iced::system::theme_changes().map(Message::Theme)];
+        // Granting a permission in System Settings sends no event, so poll while waiting.
+        if matches!(self.screen, Screen::Permissions { .. }) {
+            subs.push(iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::PollPermissions));
+        }
         if let Screen::Running { state, .. } = &self.screen {
             subs.push(Subscription::run(watch_state));
             // Animate the ribbon only while the cursor is on another device.
@@ -298,17 +329,22 @@ impl App {
                     .size(64)
                     .font(bold()),
                 Space::new().height(26),
-                row![
-                    button(text("Codes match"))
-                        .padding([10, 18])
-                        .style(style::primary)
-                        .on_press(Message::Send(Command::AnswerCode(true))),
-                    button(text("Cancel"))
-                        .padding([10, 18])
-                        .style(style::secondary)
-                        .on_press(Message::Send(Command::AnswerCode(false))),
-                ]
-                .spacing(10),
+                if self.answered {
+                    Element::from(text(format!("Waiting for {peer} to confirm…")).style(muted))
+                } else {
+                    row![
+                        button(text("Codes match"))
+                            .padding([10, 18])
+                            .style(style::primary)
+                            .on_press(Message::Send(Command::AnswerCode(true))),
+                        button(text("Cancel"))
+                            .padding([10, 18])
+                            .style(style::secondary)
+                            .on_press(Message::Send(Command::AnswerCode(false))),
+                    ]
+                    .spacing(10)
+                    .into()
+                },
             ]
             .spacing(6)
             .into(),
@@ -320,6 +356,7 @@ impl App {
                 };
                 let hint = match mode {
                     Mode::Driving(_) => format!("Press {} to take back control at any time.", escape_chord(state.os)),
+                    Mode::Driven(_) => format!("{peer} is controlling this {here}."),
                     _ => format!("Move the cursor across the screen edge to use {peer}."),
                 };
                 column![
@@ -681,10 +718,22 @@ fn open_settings(which: Permission) {
     let _ = which;
 }
 
-/// Permissions take effect for a fresh process only.
+/// Starts a fresh process, since permissions take effect for a new process only. Inside a
+/// macOS `.app` bundle it goes through `open -n`, so LaunchServices attributes the
+/// permissions to the bundle rather than to the terminal or parent that started it.
 fn relaunch() {
     if let Ok(exe) = std::env::current_exe() {
-        let _ = std::process::Command::new(exe).spawn();
+        let path = exe.to_string_lossy();
+        let bundle = if cfg!(target_os = "macos") {
+            path.split_once(".app/Contents/MacOS/")
+                .map(|(prefix, _)| format!("{prefix}.app"))
+        } else {
+            None
+        };
+        let _ = match bundle {
+            Some(bundle) => std::process::Command::new("open").arg("-n").arg(bundle).spawn(),
+            None => std::process::Command::new(exe).spawn(),
+        };
     }
     std::process::exit(0);
 }
