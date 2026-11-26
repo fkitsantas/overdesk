@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use overdesk_core::engine::Action;
+use overdesk_net::pairing::peer_id;
 use overdesk_net::session::{Me, pair};
 use overdesk_net::store::Store;
 use overdesk_net::transport::{Link, Node};
@@ -184,6 +185,12 @@ async fn serve(args: Args, platform: impl Platform + Clone, me: Me) -> Result<()
         session(link, &store, &args, &me, platform).await;
         return Ok(());
     }
+    // Announce this listener on the LAN so Overdesk apps list it under Nearby computers.
+    // Discovery is a convenience: if multicast is unavailable, listening still works.
+    let port = node.local_addr().map_err(|e| e.to_string())?.port();
+    let _advertiser = overdesk_net::discovery::Advertiser::start(peer_id(&id.fingerprint()), &me.name, me.os, port)
+        .map_err(|e| eprintln!("LAN discovery unavailable: {e}"))
+        .ok();
     // shortcut: one session at a time (Free tier: 2 devices); others wait for the next accept.
     while let Some(setup) = node.accept().await {
         match setup.await {
