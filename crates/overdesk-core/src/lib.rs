@@ -200,13 +200,22 @@ pub fn desk_layout(desk: &Desk) -> Result<Layout, LayoutError> {
 
 /// Decides whether `incoming` replaces `current`: the higher `(version, author)` wins,
 /// and only if it describes a valid layout. `Ok(None)` means "keep `current`".
-pub fn adopt(_current: &Desk, _incoming: Desk) -> Result<Option<Desk>, LayoutError> {
-    todo!()
+pub fn adopt(current: &Desk, incoming: Desk) -> Result<Option<Desk>, LayoutError> {
+    if (incoming.version, incoming.author) <= (current.version, current.author) {
+        return Ok(None);
+    }
+    desk_layout(&incoming)?;
+    Ok(Some(incoming))
 }
 
 /// A local edit: the new document outranks `current` on every peer.
-pub fn edit(_current: &Desk, _me: PeerId, _screens: Vec<DeskScreen>) -> Desk {
-    todo!()
+pub fn edit(current: &Desk, me: PeerId, screens: Vec<DeskScreen>) -> Desk {
+    // Saturating: a peer-sent u64::MAX version must not make our next edit panic.
+    Desk {
+        version: current.version.saturating_add(1),
+        author: me,
+        screens,
+    }
 }
 
 /// Maps a HID key usage typed on a `from` keyboard to the usage the `to` OS should see.
@@ -486,5 +495,7 @@ mod tests {
         let mine = edit(&cur, PeerId([1; 16]), vec![ds("a", 0), ds("b", 100)]);
         assert_eq!((mine.version, mine.author), (8, PeerId([1; 16])));
         assert_eq!(adopt(&cur, mine.clone()), Ok(Some(mine)));
+        let maxed = desk(u64::MAX, 0, vec![ds("a", 0)]);
+        assert_eq!(edit(&maxed, PeerId([1; 16]), vec![]).version, u64::MAX);
     }
 }
