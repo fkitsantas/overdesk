@@ -448,4 +448,22 @@ mod tests {
         assert!(matches!(result, Err(NetError::Closed(_))));
         assert!(started.elapsed() < SETUP_TIMEOUT + Duration::from_secs(2));
     }
+
+    #[tokio::test]
+    async fn peer_cannot_open_extra_streams() {
+        let (_, server) = node();
+        let addr = server.local_addr().unwrap();
+        let (_, client) = node();
+        let (link, _accepted) = tokio::join!(client.connect(addr), async { server.accept().await.unwrap().await });
+        let conn = link.unwrap().conn;
+        let short = Duration::from_millis(300);
+        assert!(
+            tokio::time::timeout(short, conn.open_bi()).await.is_err(),
+            "second bidi stream allowed"
+        );
+        assert!(
+            tokio::time::timeout(short, conn.open_uni()).await.is_err(),
+            "uni stream allowed"
+        );
+    }
 }

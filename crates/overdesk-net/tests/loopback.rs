@@ -5,7 +5,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use overdesk_net::pairing::peer_id;
-use overdesk_net::session::{Me, SessionError, hello, pair};
+use overdesk_net::session::{Me, SessionError, hello, pair, pair_with_timeout};
 use overdesk_net::transport::{Identity, Link, NetError, Node, Role};
 use overdesk_proto::{Control, FrameError, MAX_FRAME_LEN, Motion, Os, PROTOCOL_VERSION, Pairing};
 
@@ -310,6 +310,16 @@ async fn pairing_message_type_is_distinct_on_the_wire() {
         let mut p = trusted().await;
         p.dialer.send_pairing(&Pairing::Confirm).await.unwrap();
         assert!(p.listener.recv_control().await.is_err());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn silent_peer_cannot_hold_pairing_open() {
+    within(async {
+        let mut p = connected().await;
+        let r = pair_with_timeout(&mut p.listener, async |_| true, Duration::from_millis(300)).await;
+        assert!(matches!(r, Err(SessionError::TimedOut)), "{r:?}");
     })
     .await;
 }
