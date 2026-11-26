@@ -12,6 +12,35 @@ pub struct Rect {
     pub h: u32,
 }
 
+impl Rect {
+    // i64 so x + w cannot overflow; Layout::new guarantees results fit i32.
+    fn right(&self) -> i64 {
+        self.x as i64 + self.w as i64
+    }
+
+    fn bottom(&self) -> i64 {
+        self.y as i64 + self.h as i64
+    }
+
+    fn contains(&self, (x, y): (i64, i64)) -> bool {
+        (self.x as i64..self.right()).contains(&x) && (self.y as i64..self.bottom()).contains(&y)
+    }
+
+    fn clamp(&self, (x, y): (i64, i64)) -> (i64, i64) {
+        (
+            x.clamp(self.x as i64, self.right() - 1),
+            y.clamp(self.y as i64, self.bottom() - 1),
+        )
+    }
+
+    fn overlaps(&self, o: &Rect) -> bool {
+        (self.x as i64) < o.right()
+            && (o.x as i64) < self.right()
+            && (self.y as i64) < o.bottom()
+            && (o.y as i64) < self.bottom()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Screen {
     pub name: String,
@@ -22,6 +51,7 @@ pub struct Screen {
 pub enum LayoutError {
     Empty,
     ZeroSize(String),
+    OutOfRange(String),
     DuplicateName(String),
     Overlap(String, String),
 }
@@ -32,8 +62,31 @@ pub struct Layout {
 }
 
 impl Layout {
-    pub fn new(_screens: Vec<Screen>) -> Result<Self, LayoutError> {
-        todo!()
+    pub fn new(screens: Vec<Screen>) -> Result<Self, LayoutError> {
+        if screens.is_empty() {
+            return Err(LayoutError::Empty);
+        }
+        for (i, a) in screens.iter().enumerate() {
+            if a.rect.w == 0 || a.rect.h == 0 {
+                return Err(LayoutError::ZeroSize(a.name.clone()));
+            }
+            if a.rect.right() > i32::MAX as i64 || a.rect.bottom() > i32::MAX as i64 {
+                return Err(LayoutError::OutOfRange(a.name.clone()));
+            }
+            for b in &screens[..i] {
+                if b.name == a.name {
+                    return Err(LayoutError::DuplicateName(a.name.clone()));
+                }
+                if b.rect.overlaps(&a.rect) {
+                    return Err(LayoutError::Overlap(b.name.clone(), a.name.clone()));
+                }
+            }
+        }
+        Ok(Self { screens })
+    }
+
+    fn find(&self, p: (i64, i64)) -> Option<usize> {
+        self.screens.iter().position(|s| s.rect.contains(p))
     }
 
     pub fn screens(&self) -> &[Screen] {
@@ -58,16 +111,48 @@ pub struct Switcher {
 
 impl Switcher {
     /// Starts at the center of screen `start`.
-    pub fn new(_layout: Layout, _start: usize) -> Self {
-        todo!()
+    pub fn new(layout: Layout, start: usize) -> Self {
+        let r = layout.screens[start].rect;
+        let pos = (r.x + (r.w / 2) as i32, r.y + (r.h / 2) as i32);
+        Self {
+            layout,
+            active: start,
+            pos,
+        }
     }
 
     pub fn active(&self) -> usize {
         self.active
     }
 
-    pub fn move_by(&mut self, _dx: i32, _dy: i32) -> Motion {
-        todo!()
+    pub fn move_by(&mut self, dx: i32, dy: i32) -> Motion {
+        let from = self.active;
+        let target = (self.pos.0 as i64 + dx as i64, self.pos.1 as i64 + dy as i64);
+        let cur = self.layout.screens[from].rect;
+        if cur.contains(target) {
+            return self.settle(target, |screen, x, y| Motion::Within { screen, x, y });
+        }
+        // Probe the pixel just past the edge we hit; for corner exits also try each axis alone.
+        let edge = cur.clamp(target);
+        let (sx, sy) = ((target.0 - edge.0).signum(), (target.1 - edge.1).signum());
+        for (px, py) in [(sx, sy), (sx, 0), (0, sy)] {
+            if (px, py) == (0, 0) {
+                continue;
+            }
+            if let Some(to) = self.layout.find((edge.0 + px, edge.1 + py)) {
+                self.active = to;
+                let landing = self.layout.screens[to].rect.clamp(target);
+                return self.settle(landing, |to, x, y| Motion::Switched { from, to, x, y });
+            }
+        }
+        self.settle(edge, |screen, x, y| Motion::Within { screen, x, y })
+    }
+
+    /// Stores `p` (already inside the active screen) and reports it in local coordinates.
+    fn settle(&mut self, p: (i64, i64), make: impl FnOnce(usize, i32, i32) -> Motion) -> Motion {
+        self.pos = (p.0 as i32, p.1 as i32);
+        let r = self.layout.screens[self.active].rect;
+        make(self.active, self.pos.0 - r.x, self.pos.1 - r.y)
     }
 }
 
@@ -77,17 +162,17 @@ impl Switcher {
 pub struct HeldKeys(BTreeSet<u32>);
 
 impl HeldKeys {
-    pub fn press(&mut self, _code: u32) {
-        todo!()
+    pub fn press(&mut self, code: u32) {
+        self.0.insert(code);
     }
 
-    pub fn release(&mut self, _code: u32) {
-        todo!()
+    pub fn release(&mut self, code: u32) {
+        self.0.remove(&code);
     }
 
     /// Returns every held code (ascending) and forgets them.
     pub fn release_all(&mut self) -> Vec<u32> {
-        todo!()
+        std::mem::take(&mut self.0).into_iter().collect()
     }
 }
 
@@ -96,18 +181,28 @@ mod tests {
     use super::*;
 
     fn screen(name: &str, x: i32, y: i32, w: u32, h: u32) -> Screen {
-        Screen { name: name.into(), rect: Rect { x, y, w, h } }
+        Screen {
+            name: name.into(),
+            rect: Rect { x, y, w, h },
+        }
     }
 
     /// Laptop 1920x1080 on the left, 2560x1440 monitor on the right, tops aligned.
     fn two_screens() -> Layout {
-        Layout::new(vec![screen("laptop", 0, 0, 1920, 1080), screen("desk", 1920, 0, 2560, 1440)]).unwrap()
+        Layout::new(vec![
+            screen("laptop", 0, 0, 1920, 1080),
+            screen("desk", 1920, 0, 2560, 1440),
+        ])
+        .unwrap()
     }
 
     #[test]
     fn layout_rejects_invalid() {
         assert_eq!(Layout::new(vec![]).unwrap_err(), LayoutError::Empty);
-        assert_eq!(Layout::new(vec![screen("a", 0, 0, 0, 10)]).unwrap_err(), LayoutError::ZeroSize("a".into()));
+        assert_eq!(
+            Layout::new(vec![screen("a", 0, 0, 0, 10)]).unwrap_err(),
+            LayoutError::ZeroSize("a".into())
+        );
         assert_eq!(
             Layout::new(vec![screen("a", 0, 0, 10, 10), screen("a", 10, 0, 10, 10)]).unwrap_err(),
             LayoutError::DuplicateName("a".into())
@@ -115,6 +210,10 @@ mod tests {
         assert_eq!(
             Layout::new(vec![screen("a", 0, 0, 10, 10), screen("b", 9, 9, 10, 10)]).unwrap_err(),
             LayoutError::Overlap("a".into(), "b".into())
+        );
+        assert_eq!(
+            Layout::new(vec![screen("a", i32::MAX - 5, 0, 10, 10)]).unwrap_err(),
+            LayoutError::OutOfRange("a".into())
         );
     }
 
@@ -126,27 +225,57 @@ mod tests {
     #[test]
     fn starts_at_center_of_start_screen() {
         let mut s = Switcher::new(two_screens(), 1);
-        assert_eq!(s.move_by(0, 0), Motion::Within { screen: 1, x: 1280, y: 720 });
+        assert_eq!(
+            s.move_by(0, 0),
+            Motion::Within {
+                screen: 1,
+                x: 1280,
+                y: 720
+            }
+        );
     }
 
     #[test]
     fn moving_inside_screen_stays() {
         let mut s = Switcher::new(two_screens(), 0);
-        assert_eq!(s.move_by(10, -20), Motion::Within { screen: 0, x: 970, y: 520 });
+        assert_eq!(
+            s.move_by(10, -20),
+            Motion::Within {
+                screen: 0,
+                x: 970,
+                y: 520
+            }
+        );
     }
 
     #[test]
     fn crossing_right_edge_switches_with_local_entry_point() {
         let mut s = Switcher::new(two_screens(), 0);
         s.move_by(959, 0); // x = 1919, last laptop column
-        assert_eq!(s.move_by(1, 0), Motion::Switched { from: 0, to: 1, x: 0, y: 540 });
+        assert_eq!(
+            s.move_by(1, 0),
+            Motion::Switched {
+                from: 0,
+                to: 1,
+                x: 0,
+                y: 540
+            }
+        );
         assert_eq!(s.active(), 1);
     }
 
     #[test]
     fn fast_flick_past_neighbour_lands_on_its_far_edge() {
         let mut s = Switcher::new(two_screens(), 0);
-        assert_eq!(s.move_by(100_000, 0), Motion::Switched { from: 0, to: 1, x: 2559, y: 540 });
+        assert_eq!(
+            s.move_by(100_000, 0),
+            Motion::Switched {
+                from: 0,
+                to: 1,
+                x: 2559,
+                y: 540
+            }
+        );
     }
 
     #[test]
@@ -160,14 +289,29 @@ mod tests {
         // Desk is taller: below y=1080 there is nothing to the left.
         let mut s = Switcher::new(two_screens(), 1);
         s.move_by(0, 600); // y = 1320
-        assert_eq!(s.move_by(-5000, 0), Motion::Within { screen: 1, x: 0, y: 1320 });
+        assert_eq!(
+            s.move_by(-5000, 0),
+            Motion::Within {
+                screen: 1,
+                x: 0,
+                y: 1320
+            }
+        );
     }
 
     #[test]
     fn round_trip_returns_to_original_screen() {
         let mut s = Switcher::new(two_screens(), 0);
         s.move_by(960, 0);
-        assert_eq!(s.move_by(-1, 0), Motion::Switched { from: 1, to: 0, x: 1919, y: 540 });
+        assert_eq!(
+            s.move_by(-1, 0),
+            Motion::Switched {
+                from: 1,
+                to: 0,
+                x: 1919,
+                y: 540
+            }
+        );
     }
 
     #[test]
@@ -177,7 +321,15 @@ mod tests {
         let layout = Layout::new(vec![screen("a", 0, 0, 100, 100), screen("b", 100, 0, 100, 100)]).unwrap();
         let mut s = Switcher::new(layout, 0);
         s.move_by(49, -50); // (99, 0) top-right pixel
-        assert_eq!(s.move_by(5, -5), Motion::Switched { from: 0, to: 1, x: 4, y: 0 });
+        assert_eq!(
+            s.move_by(5, -5),
+            Motion::Switched {
+                from: 0,
+                to: 1,
+                x: 4,
+                y: 0
+            }
+        );
     }
 
     #[test]

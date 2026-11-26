@@ -49,16 +49,41 @@ pub enum ScrollPhase {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Message {
-    Hello { version: u16, name: String, os: Os, width: u32, height: u32 },
+    Hello {
+        version: u16,
+        name: String,
+        os: Os,
+        width: u32,
+        height: u32,
+    },
     /// Cursor enters the receiving screen at local coordinates.
-    Enter { x: i32, y: i32 },
+    Enter {
+        x: i32,
+        y: i32,
+    },
     Leave,
-    MouseMove { x: i32, y: i32 },
-    MouseButton { button: Button, pressed: bool },
-    Scroll { dx: i32, dy: i32, unit: ScrollUnit, phase: ScrollPhase },
+    MouseMove {
+        x: i32,
+        y: i32,
+    },
+    MouseButton {
+        button: Button,
+        pressed: bool,
+    },
+    Scroll {
+        dx: i32,
+        dy: i32,
+        unit: ScrollUnit,
+        phase: ScrollPhase,
+    },
     /// `code` is a platform-neutral USB HID usage id.
-    Key { code: u32, pressed: bool },
-    Clipboard { text: String },
+    Key {
+        code: u32,
+        pressed: bool,
+    },
+    Clipboard {
+        text: String,
+    },
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -70,14 +95,33 @@ pub enum FrameError {
 }
 
 /// Encode one message as `u32 big-endian length || postcard payload`.
-pub fn encode(_msg: &Message) -> Vec<u8> {
-    todo!()
+pub fn encode(msg: &Message) -> Vec<u8> {
+    // Serializing owned enums of ints/strings into a Vec cannot fail.
+    let payload = postcard::to_stdvec(msg).expect("postcard serialization to Vec is infallible");
+    let mut frame = Vec::with_capacity(LEN_PREFIX + payload.len());
+    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&payload);
+    frame
 }
 
 /// Decode one frame from the front of `buf`.
 /// `Ok(None)` means more bytes are needed; `Ok(Some((msg, consumed)))` otherwise.
-pub fn decode(_buf: &[u8]) -> Result<Option<(Message, usize)>, FrameError> {
-    todo!()
+pub fn decode(buf: &[u8]) -> Result<Option<(Message, usize)>, FrameError> {
+    let Some(prefix) = buf.first_chunk::<LEN_PREFIX>() else {
+        return Ok(None);
+    };
+    let len = u32::from_be_bytes(*prefix) as usize;
+    if len > MAX_FRAME_LEN {
+        return Err(FrameError::TooLarge(len));
+    }
+    let Some(payload) = buf.get(LEN_PREFIX..LEN_PREFIX + len) else {
+        return Ok(None);
+    };
+    let (msg, rest) = postcard::take_from_bytes(payload).map_err(|e| FrameError::Malformed(e.to_string()))?;
+    if !rest.is_empty() {
+        return Err(FrameError::Malformed(format!("{} trailing bytes", rest.len())));
+    }
+    Ok(Some((msg, LEN_PREFIX + len)))
 }
 
 #[cfg(test)]
@@ -86,15 +130,39 @@ mod tests {
 
     fn all_messages() -> Vec<Message> {
         vec![
-            Message::Hello { version: PROTOCOL_VERSION, name: "mac-mini".into(), os: Os::MacOs, width: 2560, height: 1440 },
+            Message::Hello {
+                version: PROTOCOL_VERSION,
+                name: "mac-mini".into(),
+                os: Os::MacOs,
+                width: 2560,
+                height: 1440,
+            },
             Message::Enter { x: 0, y: 540 },
             Message::Leave,
             Message::MouseMove { x: -5, y: 1079 },
-            Message::MouseButton { button: Button::Left, pressed: true },
-            Message::Scroll { dx: 0, dy: -120, unit: ScrollUnit::Notch120, phase: ScrollPhase::None },
-            Message::Scroll { dx: -3, dy: 17, unit: ScrollUnit::Pixel, phase: ScrollPhase::Momentum },
-            Message::Key { code: 0x04, pressed: false },
-            Message::Clipboard { text: "héllo 🌍".into() },
+            Message::MouseButton {
+                button: Button::Left,
+                pressed: true,
+            },
+            Message::Scroll {
+                dx: 0,
+                dy: -120,
+                unit: ScrollUnit::Notch120,
+                phase: ScrollPhase::None,
+            },
+            Message::Scroll {
+                dx: -3,
+                dy: 17,
+                unit: ScrollUnit::Pixel,
+                phase: ScrollPhase::Momentum,
+            },
+            Message::Key {
+                code: 0x04,
+                pressed: false,
+            },
+            Message::Clipboard {
+                text: "héllo 🌍".into(),
+            },
         ]
     }
 
@@ -117,11 +185,20 @@ mod tests {
     #[test]
     fn back_to_back_frames_decode_in_order() {
         let mut buf = encode(&Message::Leave);
-        buf.extend(encode(&Message::Key { code: 0xE3, pressed: true }));
+        buf.extend(encode(&Message::Key {
+            code: 0xE3,
+            pressed: true,
+        }));
         let (first, used) = decode(&buf).unwrap().unwrap();
         assert_eq!(first, Message::Leave);
         let (second, _) = decode(&buf[used..]).unwrap().unwrap();
-        assert_eq!(second, Message::Key { code: 0xE3, pressed: true });
+        assert_eq!(
+            second,
+            Message::Key {
+                code: 0xE3,
+                pressed: true
+            }
+        );
     }
 
     #[test]
