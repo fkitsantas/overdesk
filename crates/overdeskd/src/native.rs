@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! The real OS adapter. macOS and Windows expose the same `Capture` / `Injector` API.
+//! The real OS adapter. macOS, Windows and Linux expose the same `Capture` / `Injector` API.
 
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -8,6 +8,8 @@ use overdesk_core::engine::Action;
 use overdesk_platform::input::Captured;
 #[cfg(target_os = "macos")]
 pub use overdesk_platform::mac::ffi::{Capture, Injector, main_display_size, permissions, request_permissions};
+#[cfg(target_os = "linux")]
+pub use overdesk_platform::linux::ffi::{Capture, Injector, main_display_size, permissions, request_permissions};
 #[cfg(windows)]
 pub use overdesk_platform::win::ffi::{Capture, Injector, main_display_size, permissions, request_permissions};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -17,7 +19,7 @@ use crate::Platform;
 /// Captured input goes to whichever session asked for it last.
 type Slot = Arc<Mutex<Option<UnboundedSender<Captured>>>>;
 
-/// The [`Platform`] for macOS and Windows: real input capture and injection.
+/// The [`Platform`] for macOS, Windows and Linux: real input capture and injection.
 /// Cloning is cheap; every clone shares the same capture tap and injector thread.
 #[derive(Clone)]
 pub struct NativePlatform {

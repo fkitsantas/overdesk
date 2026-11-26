@@ -4,7 +4,7 @@
 
 #![cfg_attr(test, allow(clippy::missing_docs_in_private_items))] // test names document themselves
 pub mod controller;
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 pub mod native;
 
 use std::collections::BTreeMap;

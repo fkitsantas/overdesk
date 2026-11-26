@@ -6,6 +6,7 @@
 
 #![cfg_attr(test, allow(clippy::missing_docs_in_private_items))] // test names document themselves
 pub mod input;
+pub mod linux;
 pub mod mac;
 pub mod win;
 
@@ -16,6 +17,8 @@ pub fn clipboard_is_private() -> bool {
     return mac::ffi::clipboard_is_private();
     #[cfg(windows)]
     return win::ffi::clipboard_is_private();
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    return linux::ffi::clipboard_is_private();
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     false
 }
