@@ -93,7 +93,7 @@ costs nothing until you use it.
 | 4 | **Windows** capture and injection | 🔜 |
 | 5 | Desktop app: Tauri 2 + Svelte 5, drag-to-arrange screens, tray icon | 🔜 |
 | 6 | Linux (X11, then Wayland through libei) | 🔜 |
-| 7 | Signed installers (`.dmg`, `.msi`, `.AppImage`) and Overdesk Pro license keys | 🔜 |
+| 7 | Signed per-user installers and **self-updates without admin rights** (built for managed corporate laptops), plus Overdesk Pro license keys | 🔜 |
 | 8 | Android TV client (Pro) | 🔭 Stretch |
 
 ## Architecture
@@ -123,7 +123,7 @@ Requires [Rust](https://rustup.rs). `rust-toolchain.toml` selects the latest sta
 ```bash
 git clone https://github.com/fkitsantas/Overdesk.git
 cd Overdesk
-cargo test --workspace
+./scripts/check.sh        # fmt, clippy, tests, licenses  (Windows: scripts\check.ps1)
 ```
 
 On a Mac, try the input probe. First grant your terminal **Input Monitoring** and

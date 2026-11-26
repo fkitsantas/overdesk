@@ -132,6 +132,55 @@ Planned with the daemon:
 - Pairing is accepted only while the user has "Pair a device" open, and only one at a time.
 - Repeated failed pairings back off.
 
+## 8. Install once, update without admin
+
+The goal: IT approves and installs Overdesk once, and every later update installs itself
+for that user, silently, with no admin prompt. That's what makes Overdesk viable on
+managed corporate laptops.
+
+**Rules that all code follows now:**
+
+- **Per-user only.** No Windows service, no `launchd` daemon, no root helper, no writes
+  to `Program Files`, `/Library` or `HKLM`. Settings and keys live under the user's
+  profile (already done: `~/Library/Application Support/Overdesk` on macOS,
+  `%APPDATA%\Overdesk` on Windows).
+- **Start at login per-user:** `SMAppService` login item on macOS, the `HKCU\…\Run`
+  key on Windows.
+- **Input access without admin:**
+  - On Windows, low-level hooks and `SendInput` work as a standard user. Windows won't let
+    a standard process inject into elevated (admin) windows; we document that and don't
+    work around it.
+  - On macOS, the Accessibility and Input Monitoring grants belong to the code signature.
+    Updates signed with the same Developer ID keep the grants, so they're not prompted for again.
+
+**Install locations (user-writable, so the app can replace itself):**
+
+| OS | Installer | Location |
+|---|---|---|
+| Windows | Per-user NSIS installer (Tauri `installMode: currentUser`) | `%LOCALAPPDATA%\Programs\Overdesk` |
+| macOS | `.pkg` with "Install for me only" (`enable_currentUserHome`) | `~/Applications/Overdesk.app` |
+
+**Update flow** (Tauri 2 updater plugin):
+1. Check `https://overdesk.org/updates/{os}/{arch}/{channel}.json` over HTTPS.
+2. Download the new bundle. Verify its **Ed25519 signature** against the public key built
+   into the app, and reject it if verification fails. The private key never leaves the
+   release machine.
+3. Replace the app in its per-user location, then restart: at the next idle moment, never
+   while you're driving another device.
+4. Keep the previous version, and roll back automatically if the new one fails to start.
+
+**For IT departments:**
+- **Code signing:** Authenticode on Windows, Developer ID with notarization on macOS. IT
+  can then allow-list Overdesk *by publisher* (AppLocker or WDAC publisher rules, Jamf or
+  Intune), so updates in a per-user folder still pass.
+- **A policy to pin or turn off updates**, and a choice of `stable` / `beta` channel.
+  The policy comes from a managed config: macOS configuration profile, Windows `HKCU`/`HKLM`
+  policy key.
+
+**Costs to plan for:**
+- Apple Developer Program: about £79 a year.
+- A Windows code-signing certificate: about £200–400 a year.
+
 ## Status
 
 | Part | State |
@@ -143,5 +192,7 @@ Planned with the daemon:
 | Lazy clipboard (the wire has plain text for now) | 🔜 |
 | Pairing exchange (commit-reveal, 6-digit code) | ✅ |
 | QUIC lanes: mutual TLS 1.3, control stream, motion datagrams | ✅ |
-| LAN discovery (mDNS), saving device keys to disk, daemon | 🔜 |
+| Saving device keys to disk, daemon | ✅ |
+| LAN discovery (mDNS) | 🔜 |
+| Per-user installers and signed self-update (§8) | 🔜 |
 | Platform adapters | 🔜 |

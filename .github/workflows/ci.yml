@@ -1,9 +1,9 @@
 name: CI
 
+# Manual only: the repository is private and Actions minutes are limited.
+# Day-to-day checks run locally with scripts/check.sh (or check.ps1 on Windows).
 on:
-  push:
-    branches: [main, development]
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
