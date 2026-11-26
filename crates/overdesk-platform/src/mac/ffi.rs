@@ -432,6 +432,14 @@ impl Injector {
         }
     }
 
+    /// Where the system cursor actually is now (global points).
+    pub fn cursor() -> (f64, f64) {
+        let p = CGEvent::new(None)
+            .map(|e| CGEvent::location(Some(&e)))
+            .unwrap_or(CGPoint { x: 0.0, y: 0.0 });
+        (p.x, p.y)
+    }
+
     /// Releases every key and button this injector holds down. Call when focus leaves
     /// this Mac or the peer driving it disconnects.
     pub fn release_all(&mut self) {

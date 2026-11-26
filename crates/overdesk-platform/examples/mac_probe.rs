@@ -44,6 +44,13 @@ fn main() {
                     inj.pointer(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t);
                     std::thread::sleep(Duration::from_millis(4));
                 }
+                std::thread::sleep(Duration::from_millis(30));
+                let (cx, cy) = Injector::cursor();
+                let ok = (cx - x1).abs() < 1.0 && (cy - y1).abs() < 1.0;
+                println!(
+                    "corner ({x1}, {y1}) -> cursor at ({cx:.0}, {cy:.0}) {}",
+                    if ok { "OK" } else { "MISMATCH" }
+                );
             }
             let phases = [
                 Phase::Began,
