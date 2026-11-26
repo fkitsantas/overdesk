@@ -4,7 +4,7 @@
 
 **One keyboard. One mouse. Every computer on your desk.**
 
-Move your cursor off the edge of your Mac and keep working on your Windows PC,
+Slide your cursor off your Mac and keep working on your Windows PC,
 with input that feels native on both.
 
 [![CI](https://github.com/fkitsantas/Overdesk/actions/workflows/ci.yml/badge.svg)](https://github.com/fkitsantas/Overdesk/actions/workflows/ci.yml)
@@ -23,27 +23,70 @@ with input that feels native on both.
 
 ## Why Overdesk
 
-Most people who share a keyboard and mouse are Mac users with a Windows PC next to
-them. Existing tools treat the Mac as an afterthought. Overdesk is built around it.
+Your desk is one workspace, not a server with clients bolted on. Overdesk turns every
+device on it into a single computer, and it's built for the most common desk of all:
+**a Mac beside a Windows PC.**
 
-| | Overdesk | Typical KVM software |
-|---|---|---|
-| **Magic Mouse & trackpad scrolling** | Pixel-precise deltas with gesture and momentum phases, so inertia and rubber-banding survive the trip | Converted to coarse wheel notches |
-| **Apple keyboard on Windows** | <kbd>⌘</kbd>+<kbd>C</kbd> copies on Windows; <kbd>Ctrl</kbd>+<kbd>C</kbd> on a PC keyboard copies on the Mac | Manual remapping, or none |
-| **Transport** | QUIC with TLS 1.3, encrypted by default | Plain TCP, TLS optional |
-| **Pairing** | Certificate fingerprint, trusted on first use | Manual fingerprint files |
-| **Stuck keys** | Every held key is released when focus leaves a screen or a peer drops | Common complaint |
-| **Language** | Memory-safe Rust | Mostly C++ |
+<table>
+<tr>
+<td width="50%" valign="top">
 
-<sub>The Overdesk column describes the design. Items not yet built are tracked in the roadmap below.</sub>
+### ✋ Input follows your hand
+There's no server or client. Touch the Mac trackpad and it drives the PC; grab the PC
+mouse and it drives the Mac. Every device is an equal peer.
+
+</td>
+<td width="50%" valign="top">
+
+### 🍎 Apple input, native everywhere
+Pixel-precise Magic Mouse and trackpad scrolling, with momentum and rubber-banding intact.
+Pinch, rotate and smart zoom. <kbd>⌘</kbd>+<kbd>C</kbd> copies on Windows.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### ⚡ A cursor that never stalls
+Pointer motion travels as QUIC datagrams where the newest wins, so a lost packet is
+simply superseded. Keys travel on a separate reliable lane and never arrive out of order.
+
+</td>
+<td valign="top">
+
+### 🔐 Private by default
+Every connection is TLS 1.3. To pair, both screens show the same 6-digit code. No
+fingerprint files, no open ports to babysit.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### 🧭 One Desk, edited anywhere
+Layout and settings are replicated to every device. Rearrange your screens from whichever
+computer you're sitting at.
+
+</td>
+<td valign="top">
+
+### 📋 Clipboard on demand
+A copy only announces what it holds. Bytes move when you paste, so a 50 MB screenshot
+costs nothing until you use it.
+
+</td>
+</tr>
+</table>
+
+<sub>These features describe the design; the roadmap below shows what's built.</sub>
 
 ## Roadmap
 
 | Phase | What | Status |
 |---|---|---|
 | 0 | Workspace, CI on macOS / Windows / Linux, license checks, CLA | ✅ Done |
-| 1 | Wire protocol and core logic: screen layout, edge switching, held keys, ⌘↔Ctrl remap | ✅ Done |
-| 2 | QUIC networking, pairing, LAN discovery, latency benchmark | ⏳ Next |
+| 1 | Two-lane wire protocol and core logic: screen layout, edge switching, held keys, ⌘↔Ctrl remap | ✅ Done |
+| 2 | Replicated Desk state, QUIC lanes, 6-digit pairing, LAN discovery, latency benchmark | ⏳ Next |
 | 3 | **macOS** capture and injection, plus native Magic Mouse / trackpad / keyboard (media and 🌐 Globe keys) | 🔜 |
 | 4 | **Windows** capture and injection | 🔜 |
 | 5 | Desktop app: Tauri 2 + Svelte 5, drag-to-arrange screens, tray icon | 🔜 |
@@ -55,22 +98,18 @@ them. Existing tools treat the Mac as an afterthought. Overdesk is built around 
 
 ```mermaid
 flowchart LR
-    subgraph Mac["🍎 Mac (has the keyboard)"]
-        CAP[Capture<br/>CGEventTap] --> CORE1[overdesk-core<br/>layout · switch · remap]
+    subgraph Desk["Your Desk: equal peers"]
+        A["🍎 MacBook<br/>source"] -- "motion lane · QUIC datagrams" --> B["🪟 Windows PC<br/>focus"]
+        A <-. "control lane · reliable stream" .-> B
     end
-    subgraph PC["🪟 Windows PC"]
-        CORE2[overdesk-core] --> INJ[Inject<br/>SendInput]
-    end
-    CORE1 -- "overdesk-proto over QUIC + TLS 1.3" --> CORE2
 ```
 
 | Crate | Role |
 |---|---|
-| [`overdesk-proto`](crates/overdesk-proto) | Wire messages and length-prefixed framing; rejects frames over 1 MiB |
-| [`overdesk-core`](crates/overdesk-core) | Platform-free logic: layout validation, cursor handoff across screen edges, held-key tracking, ⌘↔Ctrl remap |
+| [`overdesk-proto`](crates/overdesk-proto) | Wire types for both lanes, length-prefixed control frames (1 MiB cap), wrap-safe motion sequencing |
+| [`overdesk-core`](crates/overdesk-core) | Pure logic: layout validation, cursor focus across screen edges, held-key release, ⌘↔Ctrl remap |
 
-Positions use one logical, DPI-independent coordinate plane, so a Retina MacBook and a 4K
-Windows monitor line up the way you arrange them.
+Read the full design in **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 
 ## Build from source
 

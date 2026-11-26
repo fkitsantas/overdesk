@@ -161,12 +161,17 @@ pub fn decode_control(buf: &[u8]) -> Result<Option<(Control, usize)>, FrameError
 }
 
 /// Encode a motion datagram (no length prefix: the datagram is the frame).
-pub fn encode_motion(_m: &Motion) -> Vec<u8> {
-    todo!()
+pub fn encode_motion(m: &Motion) -> Vec<u8> {
+    // Three varints into a Vec cannot fail.
+    postcard::to_stdvec(m).expect("postcard serialization of Motion is infallible")
 }
 
-pub fn decode_motion(_datagram: &[u8]) -> Result<Motion, FrameError> {
-    todo!()
+pub fn decode_motion(datagram: &[u8]) -> Result<Motion, FrameError> {
+    let (m, rest) = postcard::take_from_bytes(datagram).map_err(malformed)?;
+    if !rest.is_empty() {
+        return Err(FrameError::Malformed(format!("{} trailing bytes", rest.len())));
+    }
+    Ok(m)
 }
 
 /// Accepts only motion newer than the last accepted one, using wrap-safe
@@ -177,8 +182,12 @@ pub struct SeqGate {
 }
 
 impl SeqGate {
-    pub fn accept(&mut self, _seq: u32) -> bool {
-        todo!()
+    pub fn accept(&mut self, seq: u32) -> bool {
+        let newer = self.last.is_none_or(|last| (seq.wrapping_sub(last) as i32) > 0);
+        if newer {
+            self.last = Some(seq);
+        }
+        newer
     }
 }
 
