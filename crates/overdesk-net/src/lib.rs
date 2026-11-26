@@ -3,3 +3,5 @@
 //! See `docs/ARCHITECTURE.md` §2 and §7.
 
 pub mod pairing;
+pub mod session;
+pub mod transport;
