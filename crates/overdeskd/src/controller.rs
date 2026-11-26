@@ -387,6 +387,11 @@ async fn control<P: Platform + Clone + Sync>(
                     let s = shared.state.borrow();
                     (s.phase.clone(), s.nearby.clone())
                 };
+                // Connected again, from either side: the user wants these two together, so a later
+                // network drop reconnects even if this device had disconnected earlier.
+                if matches!(phase, Phase::Connected { .. }) {
+                    suppressed = false;
+                }
                 if !busy(&active) && !suppressed && matches!(phase, Phase::Idle | Phase::Lost { .. }) {
                     let target = auto_target(
                         my_id,
