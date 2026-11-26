@@ -5,9 +5,9 @@ use std::future::Future;
 use std::time::Duration;
 
 use overdesk_net::pairing::peer_id;
-use overdesk_net::session::{Me, Role, SessionError, hello, pair};
-use overdesk_net::transport::{Identity, Link, NetError, Node};
-use overdesk_proto::{Control, MAX_FRAME_LEN, Motion, Os, PROTOCOL_VERSION, Pairing};
+use overdesk_net::session::{Me, SessionError, hello, pair};
+use overdesk_net::transport::{Identity, Link, NetError, Node, Role};
+use overdesk_proto::{Control, FrameError, MAX_FRAME_LEN, Motion, Os, PROTOCOL_VERSION, Pairing};
 
 /// Every test is bounded: a hang is a failure, not a stuck CI job.
 async fn within<T>(f: impl Future<Output = T>) -> T {
@@ -39,6 +39,15 @@ async fn connected() -> Pair {
     }
 }
 
+/// Both sides already paired: each trusts exactly the other's fingerprint.
+async fn trusted() -> Pair {
+    let mut p = connected().await;
+    let (dfp, lfp) = (p.dialer_id.fingerprint(), p.listener_id.fingerprint());
+    p.dialer.trust(|fp| *fp == lfp).unwrap();
+    p.listener.trust(|fp| *fp == dfp).unwrap();
+    p
+}
+
 fn me(name: &str) -> Me {
     Me {
         name: name.into(),
@@ -49,11 +58,39 @@ fn me(name: &str) -> Me {
 }
 
 #[tokio::test]
-async fn both_sides_see_the_other_certificate() {
+async fn both_sides_see_the_other_certificate_and_their_role() {
     within(async {
         let p = connected().await;
         assert_eq!(p.dialer.peer_fingerprint(), p.listener_id.fingerprint());
         assert_eq!(p.listener.peer_fingerprint(), p.dialer_id.fingerprint());
+        assert_eq!((p.dialer.role(), p.listener.role()), (Role::Dialer, Role::Listener));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn untrusted_link_refuses_control_and_motion() {
+    within(async {
+        let mut p = connected().await;
+        let key = Control::Key { code: 4, pressed: true };
+        assert!(matches!(p.dialer.send_control(&key).await, Err(NetError::Untrusted)));
+        assert!(matches!(p.listener.recv_control().await, Err(NetError::Untrusted)));
+        assert!(matches!(
+            p.dialer.send_motion(&Motion { seq: 1, x: 0, y: 0 }),
+            Err(NetError::Untrusted)
+        ));
+        assert!(matches!(p.listener.recv_motion().await, Err(NetError::Untrusted)));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn trust_refuses_an_unpinned_fingerprint() {
+    within(async {
+        let mut p = connected().await;
+        assert!(matches!(p.dialer.trust(|_| false), Err(NetError::Untrusted)));
+        let key = Control::Key { code: 4, pressed: true };
+        assert!(matches!(p.dialer.send_control(&key).await, Err(NetError::Untrusted)));
     })
     .await;
 }
@@ -61,25 +98,28 @@ async fn both_sides_see_the_other_certificate() {
 #[tokio::test]
 async fn control_frames_flow_both_ways_in_order() {
     within(async {
-        let mut p = connected().await;
+        let mut p = trusted().await;
         for code in [4, 5, 6] {
-            p.dialer.send(&Control::Key { code, pressed: true }).await.unwrap();
+            p.dialer
+                .send_control(&Control::Key { code, pressed: true })
+                .await
+                .unwrap();
         }
         for code in [4, 5, 6] {
             assert_eq!(
-                p.listener.recv::<Control>().await.unwrap(),
+                p.listener.recv_control().await.unwrap(),
                 Control::Key { code, pressed: true }
             );
         }
         p.listener
-            .send(&Control::Key {
+            .send_control(&Control::Key {
                 code: 7,
                 pressed: false,
             })
             .await
             .unwrap();
         assert_eq!(
-            p.dialer.recv::<Control>().await.unwrap(),
+            p.dialer.recv_control().await.unwrap(),
             Control::Key {
                 code: 7,
                 pressed: false
@@ -90,13 +130,13 @@ async fn control_frames_flow_both_ways_in_order() {
 }
 
 #[tokio::test]
-async fn oversized_frame_is_refused_before_reading_it() {
+async fn oversized_frame_is_refused_before_sending() {
     within(async {
-        let mut p = connected().await;
+        let mut p = trusted().await;
         let big = Control::Clipboard {
             text: "x".repeat(MAX_FRAME_LEN + 1),
         };
-        assert!(matches!(p.dialer.send(&big).await, Err(NetError::Frame(_))));
+        assert!(matches!(p.dialer.send_control(&big).await, Err(NetError::Frame(_))));
     })
     .await;
 }
@@ -104,7 +144,7 @@ async fn oversized_frame_is_refused_before_reading_it() {
 #[tokio::test]
 async fn motion_datagrams_arrive() {
     within(async {
-        let p = connected().await;
+        let p = trusted().await;
         let m = Motion { seq: 42, x: 100, y: -5 };
         // Datagrams may drop; loopback practically never does, but retry to stay deterministic.
         let got = loop {
@@ -121,9 +161,9 @@ async fn motion_datagrams_arrive() {
 #[tokio::test]
 async fn peer_going_away_is_noticed() {
     within(async {
-        let mut p = connected().await;
+        let mut p = trusted().await;
         p.dialer.close("bye");
-        assert!(matches!(p.listener.recv::<Control>().await, Err(NetError::Closed(_))));
+        assert!(matches!(p.listener.recv_control().await, Err(NetError::Closed(_))));
     })
     .await;
 }
@@ -136,11 +176,11 @@ async fn pairing_shows_the_same_code_and_pins_on_both_confirms() {
         let (codes_tx, mut codes_rx) = tokio::sync::mpsc::unbounded_channel();
         let (tx1, tx2) = (codes_tx.clone(), codes_tx);
         let (d, l) = tokio::join!(
-            pair(&mut p.dialer, Role::Dialer, dfp, async move |c| {
+            pair(&mut p.dialer, async move |c| {
                 tx1.send(c).unwrap();
                 true
             }),
-            pair(&mut p.listener, Role::Listener, lfp, async move |c| {
+            pair(&mut p.listener, async move |c| {
                 tx2.send(c).unwrap();
                 true
             }),
@@ -156,10 +196,9 @@ async fn pairing_shows_the_same_code_and_pins_on_both_confirms() {
 async fn pairing_fails_if_either_user_declines() {
     within(async {
         let mut p = connected().await;
-        let (dfp, lfp) = (p.dialer_id.fingerprint(), p.listener_id.fingerprint());
         let (d, l) = tokio::join!(
-            pair(&mut p.dialer, Role::Dialer, dfp, async |_| true),
-            pair(&mut p.listener, Role::Listener, lfp, async |_| false),
+            pair(&mut p.dialer, async |_| true),
+            pair(&mut p.listener, async |_| false)
         );
         assert!(matches!(d, Err(SessionError::Declined)));
         assert!(matches!(l, Err(SessionError::Declined)));
@@ -170,11 +209,33 @@ async fn pairing_fails_if_either_user_declines() {
 #[tokio::test]
 async fn untrusted_peer_cannot_send_input() {
     within(async {
+        // Even a dialer that (wrongly) trusts, sending real Control, cannot get past
+        // a listener that is pairing: those bytes never decode as Pairing.
         let mut p = connected().await;
-        let lfp = p.listener_id.fingerprint();
-        p.dialer.send(&Control::Key { code: 4, pressed: true }).await.unwrap();
-        let result = pair(&mut p.listener, Role::Listener, lfp, async |_| true).await;
-        assert!(result.is_err(), "a Control frame must never pass the pairing gate");
+        p.dialer.trust(|_| true).unwrap();
+        p.dialer
+            .send_control(&Control::Key { code: 4, pressed: true })
+            .await
+            .unwrap();
+        assert!(pair(&mut p.listener, async |_| true).await.is_err());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn pre_pairing_frames_are_tiny() {
+    within(async {
+        let mut p = connected().await;
+        p.dialer.trust(|_| true).unwrap();
+        p.dialer
+            .send_control(&Control::Clipboard { text: "x".repeat(1000) })
+            .await
+            .unwrap();
+        let r = pair(&mut p.listener, async |_| true).await;
+        assert!(
+            matches!(r, Err(SessionError::Net(NetError::Frame(FrameError::TooLarge(_))))),
+            "{r:?}"
+        );
     })
     .await;
 }
@@ -182,7 +243,7 @@ async fn untrusted_peer_cannot_send_input() {
 #[tokio::test]
 async fn hello_exchanges_and_checks_identity() {
     within(async {
-        let mut p = connected().await;
+        let mut p = trusted().await;
         let (mac, pc) = (me("mac"), me("pc"));
         let (d, l) = tokio::join!(hello(&mut p.dialer, &mac), hello(&mut p.listener, &pc));
         let Control::Hello { name, peer, .. } = d.unwrap() else {
@@ -195,9 +256,21 @@ async fn hello_exchanges_and_checks_identity() {
 }
 
 #[tokio::test]
-async fn hello_with_wrong_version_or_forged_id_is_rejected() {
+async fn hello_requires_trust() {
     within(async {
         let mut p = connected().await;
+        assert!(matches!(
+            hello(&mut p.dialer, &me("mac")).await,
+            Err(SessionError::Net(NetError::Untrusted))
+        ));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn hello_with_wrong_version_or_forged_id_is_rejected() {
+    within(async {
+        let mut p = trusted().await;
         let forged = Control::Hello {
             version: PROTOCOL_VERSION,
             peer: overdesk_proto::PeerId([0xAA; 16]),
@@ -206,14 +279,14 @@ async fn hello_with_wrong_version_or_forged_id_is_rejected() {
             width: 1,
             height: 1,
         };
-        p.dialer.send(&forged).await.unwrap();
+        p.dialer.send_control(&forged).await.unwrap();
         assert!(matches!(
             hello(&mut p.listener, &me("pc")).await,
             Err(SessionError::IdentityMismatch)
         ));
 
-        let mut p = connected().await;
-        let old = Control::Hello {
+        let mut p = trusted().await;
+        let future = Control::Hello {
             version: PROTOCOL_VERSION + 1,
             peer: peer_id(&p.dialer_id.fingerprint()),
             name: "future".into(),
@@ -221,7 +294,7 @@ async fn hello_with_wrong_version_or_forged_id_is_rejected() {
             width: 1,
             height: 1,
         };
-        p.dialer.send(&old).await.unwrap();
+        p.dialer.send_control(&future).await.unwrap();
         assert!(matches!(
             hello(&mut p.listener, &me("pc")).await,
             Err(SessionError::VersionMismatch { .. })
@@ -234,9 +307,9 @@ async fn hello_with_wrong_version_or_forged_id_is_rejected() {
 async fn pairing_message_type_is_distinct_on_the_wire() {
     // Guards the gate above: a Pairing frame is not a Control frame.
     within(async {
-        let mut p = connected().await;
-        p.dialer.send(&Pairing::Confirm).await.unwrap();
-        assert!(p.listener.recv::<Control>().await.is_err());
+        let mut p = trusted().await;
+        p.dialer.send_pairing(&Pairing::Confirm).await.unwrap();
+        assert!(p.listener.recv_control().await.is_err());
     })
     .await;
 }
