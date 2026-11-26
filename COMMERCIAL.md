@@ -1,29 +1,39 @@
-# Commercial licensing
+# Licensing and pricing
 
-Overdesk is dual-licensed.
+Overdesk is **open core**.
 
-## 1. AGPL-3.0-only (free)
+## Overdesk Free
 
-Anyone may use, study, modify and share Overdesk under the
-[GNU Affero General Public License v3.0](LICENSE). If you distribute Overdesk, or
-let people use a modified version over a network, you must release your complete
-corresponding source code under the same license.
+The core in this repository is free under the
+[GNU Affero General Public License v3.0](LICENSE). It includes:
 
-## 2. Commercial license (paid)
+- Up to **2 devices** on one Desk.
+- Full native Apple input: Magic Mouse and trackpad scrolling with momentum,
+  ⌘↔Ctrl remapping, media and 🌐 Globe keys.
+- Keyboard, mouse and text clipboard, encrypted and peer-to-peer.
 
-You need a commercial license if you want to:
+## Overdesk Pro: £20, lifetime
 
-- ship Overdesk, or code derived from it, inside a proprietary or closed-source product;
-- distribute a modified Overdesk without publishing your changes;
-- use Overdesk code under any terms other than the AGPL.
+A one-time purchase, licensed to your email address, with no subscription. It adds:
 
-To request a commercial license, open an issue titled **"Commercial license
-inquiry"** at <https://github.com/fkitsantas/Overdesk/issues> or contact the
-maintainer through their GitHub profile.
+- **3 or more devices** on one Desk.
+- File and image clipboard.
+- Trackpad gestures: pinch, rotate, smart zoom.
+- Android TV client.
+
+Pro features live in a separate, closed-source module. A Pro license key unlocks them,
+works offline, and covers every device you own.
+
+## Commercial licensing for companies
+
+The AGPL requires anyone who ships or hosts a modified version of the core to publish
+their source code. To embed Overdesk code in a closed-source or commercial product, open
+an issue titled **"Commercial license inquiry"** at
+<https://github.com/fkitsantas/Overdesk/issues>.
 
 ## Contributions
 
-All contributors sign the [Contributor License Agreement](CLA.md). It is what lets
-the project offer both licenses.
+All contributors sign the [Contributor License Agreement](CLA.md), which makes this
+licensing model possible.
 
 > This file explains the licensing model. It is not legal advice, and it is not the license itself.
