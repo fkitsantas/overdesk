@@ -17,7 +17,9 @@ async fn main() {
     let b = Node::bind(&b_id, "127.0.0.1:0".parse().unwrap()).unwrap();
     let addr = b.local_addr().unwrap();
     let (dialer, listener) = tokio::join!(a.connect(addr), async { b.accept().await.unwrap().await });
-    let (dialer, listener) = (dialer.unwrap(), listener.unwrap());
+    let (mut dialer, mut listener) = (dialer.unwrap(), listener.unwrap());
+    dialer.trust(|_| true).unwrap(); // benchmark only: no pairing
+    listener.trust(|_| true).unwrap();
 
     // Echo every datagram straight back.
     tokio::spawn(async move {

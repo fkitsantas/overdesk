@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use overdesk_proto::{FrameError, MAX_FRAME_LEN, Motion, decode_motion, encode_frame, encode_motion};
+use overdesk_proto::{Control, FrameError, MAX_FRAME_LEN, Motion, Pairing, decode_motion, encode_frame, encode_motion};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{Connection, Endpoint, RecvStream, SendStream, TransportConfig};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -28,6 +28,8 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 const STREAM_PREAMBLE: u8 = 1;
 /// A peer that connects but never opens its control stream is dropped after this.
 pub const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Largest pairing message is ~40 bytes; an unpaired peer gets no more than this.
+const MAX_PAIRING_FRAME: usize = 128;
 
 #[derive(Debug, thiserror::Error)]
 pub enum NetError {
@@ -39,6 +41,9 @@ pub enum NetError {
     Tls(String),
     #[error("io: {0}")]
     Io(String),
+    /// Control or motion on a link whose peer is not pinned.
+    #[error("peer is not trusted")]
+    Untrusted,
 }
 
 fn tls(e: impl std::fmt::Display) -> NetError {
@@ -227,7 +232,7 @@ impl Node {
             .map_err(closed)?;
         let (mut send, recv) = conn.open_bi().await.map_err(closed)?;
         send.write_all(&[STREAM_PREAMBLE]).await.map_err(closed)?;
-        Link::new(conn, send, recv, self.local)
+        Link::new(conn, send, recv, self.local, Role::Dialer)
     }
 
     /// Waits for the next incoming connection and returns its setup as a separate
@@ -247,7 +252,7 @@ impl Node {
                     conn.close(1u32.into(), b"unknown stream format");
                     return Err(closed("unknown stream format"));
                 }
-                Link::new(conn, send, recv, local)
+                Link::new(conn, send, recv, local, Role::Listener)
             };
             // Dropping the timed-out setup drops the connection, which closes it.
             tokio::time::timeout(SETUP_TIMEOUT, setup)
@@ -257,17 +262,34 @@ impl Node {
     }
 }
 
-/// An authenticated connection to one peer.
+/// Which side opened the connection. Fixed at creation, so callers cannot get the
+/// pairing order wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Dialer,
+    Listener,
+}
+
+/// An authenticated connection to one peer. Until [`Link::trust`] succeeds, only
+/// pairing messages can be exchanged: control and motion return `Untrusted`.
 pub struct Link {
     conn: Connection,
     send: SendStream,
     recv: RecvStream,
     peer: Fingerprint,
     local: Fingerprint,
+    role: Role,
+    trusted: bool,
 }
 
 impl Link {
-    fn new(conn: Connection, send: SendStream, recv: RecvStream, local: Fingerprint) -> Result<Self, NetError> {
+    fn new(
+        conn: Connection,
+        send: SendStream,
+        recv: RecvStream,
+        local: Fingerprint,
+        role: Role,
+    ) -> Result<Self, NetError> {
         let certs = conn
             .peer_identity()
             .and_then(|id| id.downcast::<Vec<CertificateDer<'static>>>().ok())
@@ -276,6 +298,8 @@ impl Link {
         Ok(Self {
             peer: fingerprint(leaf),
             local,
+            role,
+            trusted: false,
             conn,
             send,
             recv,
@@ -292,24 +316,61 @@ impl Link {
         self.local
     }
 
-    pub async fn send<T: Serialize>(&mut self, msg: &T) -> Result<(), NetError> {
+    pub fn role(&self) -> Role {
+        self.role
+    }
+
+    /// Unlocks control and motion if `pinned` accepts the peer's fingerprint.
+    pub fn trust(&mut self, pinned: impl Fn(&Fingerprint) -> bool) -> Result<(), NetError> {
+        self.trusted = pinned(&self.peer);
+        if self.trusted { Ok(()) } else { Err(NetError::Untrusted) }
+    }
+
+    fn require_trust(&self) -> Result<(), NetError> {
+        if self.trusted { Ok(()) } else { Err(NetError::Untrusted) }
+    }
+
+    pub async fn send_pairing(&mut self, msg: &Pairing) -> Result<(), NetError> {
+        self.send_frame(msg).await
+    }
+
+    pub async fn recv_pairing(&mut self) -> Result<Pairing, NetError> {
+        self.recv_frame(MAX_PAIRING_FRAME).await
+    }
+
+    pub async fn send_control(&mut self, msg: &Control) -> Result<(), NetError> {
+        self.require_trust()?;
+        self.send_frame(msg).await
+    }
+
+    pub async fn recv_control(&mut self) -> Result<Control, NetError> {
+        self.require_trust()?;
+        self.recv_frame(MAX_FRAME_LEN).await
+    }
+
+    async fn send_frame<T: Serialize>(&mut self, msg: &T) -> Result<(), NetError> {
         let frame = encode_frame(msg)?;
         self.send.write_all(&frame).await.map_err(closed)
     }
 
-    /// Reads one frame: 4-byte length, limit check, then exactly that many bytes.
-    pub async fn recv<T: DeserializeOwned>(&mut self) -> Result<T, NetError> {
+    /// Reads one frame: 4-byte length, limit check, then the body as it arrives, so a
+    /// peer that announces a large frame and dribbles bytes cannot pin `max_len` of memory.
+    /// Not cancel-safe: abandoning it mid-frame desynchronises the stream.
+    async fn recv_frame<T: DeserializeOwned>(&mut self, max_len: usize) -> Result<T, NetError> {
         let mut len = [0u8; 4];
         self.recv.read_exact(&mut len).await.map_err(closed)?;
         let n = u32::from_be_bytes(len) as usize;
-        if n > MAX_FRAME_LEN {
+        if n > max_len {
             self.close("frame too large");
             return Err(FrameError::TooLarge(n).into());
         }
-        let mut frame = Vec::with_capacity(4 + n);
-        frame.extend_from_slice(&len);
-        frame.resize(4 + n, 0);
-        self.recv.read_exact(&mut frame[4..]).await.map_err(closed)?;
+        let mut frame = len.to_vec();
+        while frame.len() < 4 + n {
+            let want = 4 + n - frame.len();
+            let chunk = self.recv.read_chunk(want, true).await.map_err(closed)?;
+            let chunk = chunk.ok_or_else(|| closed("stream ended mid-frame"))?;
+            frame.extend_from_slice(&chunk.bytes);
+        }
         match overdesk_proto::decode_frame(&frame)? {
             Some((msg, _)) => Ok(msg),
             None => unreachable!("frame is complete by construction"),
@@ -317,10 +378,12 @@ impl Link {
     }
 
     pub fn send_motion(&self, m: &Motion) -> Result<(), NetError> {
+        self.require_trust()?;
         self.conn.send_datagram(encode_motion(m).into()).map_err(closed)
     }
 
     pub async fn recv_motion(&self) -> Result<Motion, NetError> {
+        self.require_trust()?;
         let d = self.conn.read_datagram().await.map_err(closed)?;
         Ok(decode_motion(&d)?)
     }

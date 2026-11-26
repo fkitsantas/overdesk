@@ -6,7 +6,7 @@ use overdesk_proto::{Control, Os, PROTOCOL_VERSION, Pairing};
 use ring::rand::{SecureRandom, SystemRandom};
 
 use crate::pairing::{Dialer, Fingerprint, Listener, Nonce, PairError, Step, peer_id};
-use crate::transport::{Link, NetError};
+use crate::transport::{Link, NetError, Role};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -30,13 +30,6 @@ impl From<PairError> for SessionError {
     }
 }
 
-/// Which side of the connection we are.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Role {
-    Dialer,
-    Listener,
-}
-
 fn fresh_nonce() -> Result<Nonce, SessionError> {
     let mut n = [0u8; 32];
     SystemRandom::new()
@@ -49,34 +42,24 @@ fn fresh_nonce() -> Result<Nonce, SessionError> {
 /// Returns the peer fingerprint to pin, only if both users confirmed. Protocol
 /// failures close the link. A clean decline leaves it open, because closing at once could
 /// discard our `Reject` before the peer reads it; the caller drops the link.
-pub async fn pair(
-    link: &mut Link,
-    role: Role,
-    my_fp: Fingerprint,
-    confirm: impl AsyncFnOnce(u32) -> bool,
-) -> Result<Fingerprint, SessionError> {
-    let result = pair_inner(link, role, my_fp, confirm).await;
+pub async fn pair(link: &mut Link, confirm: impl AsyncFnOnce(u32) -> bool) -> Result<Fingerprint, SessionError> {
+    let result = pair_inner(link, confirm).await;
     if matches!(result, Err(ref e) if !matches!(e, SessionError::Declined)) {
         link.close("pairing failed");
     }
     result
 }
 
-async fn pair_inner(
-    link: &mut Link,
-    role: Role,
-    my_fp: Fingerprint,
-    confirm: impl AsyncFnOnce(u32) -> bool,
-) -> Result<Fingerprint, SessionError> {
-    let peer_fp = link.peer_fingerprint();
+async fn pair_inner(link: &mut Link, confirm: impl AsyncFnOnce(u32) -> bool) -> Result<Fingerprint, SessionError> {
+    let (my_fp, peer_fp) = (link.local_fingerprint(), link.peer_fingerprint());
     let nonce = fresh_nonce()?;
-    let code = match role {
+    let code = match link.role() {
         Role::Dialer => {
             let (mut d, commit) = Dialer::new(nonce, my_fp, peer_fp);
-            link.send(&commit).await?;
-            match d.on_message(&link.recv::<Pairing>().await?)? {
+            link.send_pairing(&commit).await?;
+            match d.on_message(&link.recv_pairing().await?)? {
                 Step::SendAndShow(reveal, code) => {
-                    link.send(&reveal).await?;
+                    link.send_pairing(&reveal).await?;
                     code
                 }
                 _ => return Err(PairError::Unexpected.into()),
@@ -84,19 +67,20 @@ async fn pair_inner(
         }
         Role::Listener => {
             let mut l = Listener::new(nonce, peer_fp, my_fp);
-            let Step::Send(reply) = l.on_message(&link.recv::<Pairing>().await?)? else {
+            let Step::Send(reply) = l.on_message(&link.recv_pairing().await?)? else {
                 return Err(PairError::Unexpected.into());
             };
-            link.send(&reply).await?;
-            let Step::Show(code) = l.on_message(&link.recv::<Pairing>().await?)? else {
+            link.send_pairing(&reply).await?;
+            let Step::Show(code) = l.on_message(&link.recv_pairing().await?)? else {
                 return Err(PairError::Unexpected.into());
             };
             code
         }
     };
     let ok = confirm(code).await;
-    link.send(&if ok { Pairing::Confirm } else { Pairing::Reject }).await?;
-    let theirs = link.recv::<Pairing>().await?;
+    link.send_pairing(&if ok { Pairing::Confirm } else { Pairing::Reject })
+        .await?;
+    let theirs = link.recv_pairing().await?;
     if ok && theirs == Pairing::Confirm {
         Ok(peer_fp)
     } else {
@@ -115,7 +99,7 @@ pub struct Me {
 
 /// Exchanges `Hello` with a trusted peer. Returns the peer's `Hello`.
 pub async fn hello(link: &mut Link, me: &Me) -> Result<Control, SessionError> {
-    link.send(&Control::Hello {
+    link.send_control(&Control::Hello {
         version: PROTOCOL_VERSION,
         peer: peer_id(&link.local_fingerprint()),
         name: me.name.clone(),
@@ -124,7 +108,7 @@ pub async fn hello(link: &mut Link, me: &Me) -> Result<Control, SessionError> {
         height: me.height,
     })
     .await?;
-    let theirs = link.recv::<Control>().await?;
+    let theirs = link.recv_control().await?;
     let Control::Hello { version, peer, .. } = &theirs else {
         return Err(SessionError::NoHello);
     };
