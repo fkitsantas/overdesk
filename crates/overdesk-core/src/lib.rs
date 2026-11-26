@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-pub use overdesk_proto::Os;
+pub use overdesk_proto::{Desk, DeskScreen, Os, PeerId};
 
 /// Screen rectangle in the shared logical (DPI-independent) desktop plane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +178,35 @@ impl HeldKeys {
     pub fn release_all(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.0).into_iter().collect()
     }
+}
+
+/// Builds the validated layout a Desk document describes.
+pub fn desk_layout(desk: &Desk) -> Result<Layout, LayoutError> {
+    Layout::new(
+        desk.screens
+            .iter()
+            .map(|d| Screen {
+                name: d.name.clone(),
+                rect: Rect {
+                    x: d.x,
+                    y: d.y,
+                    w: d.w,
+                    h: d.h,
+                },
+            })
+            .collect(),
+    )
+}
+
+/// Decides whether `incoming` replaces `current`: the higher `(version, author)` wins,
+/// and only if it describes a valid layout. `Ok(None)` means "keep `current`".
+pub fn adopt(_current: &Desk, _incoming: Desk) -> Result<Option<Desk>, LayoutError> {
+    todo!()
+}
+
+/// A local edit: the new document outranks `current` on every peer.
+pub fn edit(_current: &Desk, _me: PeerId, _screens: Vec<DeskScreen>) -> Desk {
+    todo!()
 }
 
 /// Maps a HID key usage typed on a `from` keyboard to the usage the `to` OS should see.
@@ -403,5 +432,59 @@ mod tests {
         k.release(0x05);
         assert_eq!(k.release_all(), vec![0x04, 0xE1]);
         assert_eq!(k.release_all(), Vec::<u32>::new());
+    }
+
+    fn desk(version: u64, author: u8, screens: Vec<DeskScreen>) -> Desk {
+        Desk {
+            version,
+            author: PeerId([author; 16]),
+            screens,
+        }
+    }
+
+    fn ds(name: &str, x: i32) -> DeskScreen {
+        DeskScreen {
+            peer: PeerId([0; 16]),
+            name: name.into(),
+            x,
+            y: 0,
+            w: 100,
+            h: 100,
+        }
+    }
+
+    #[test]
+    fn newer_desk_wins_older_is_ignored() {
+        let cur = desk(5, 1, vec![ds("a", 0)]);
+        let newer = desk(6, 0, vec![ds("a", 0), ds("b", 100)]);
+        assert_eq!(adopt(&cur, newer.clone()), Ok(Some(newer)));
+        assert_eq!(adopt(&cur, desk(4, 9, vec![ds("a", 0)])), Ok(None));
+        assert_eq!(adopt(&cur, cur.clone()), Ok(None), "same document");
+    }
+
+    #[test]
+    fn equal_versions_break_ties_by_author() {
+        let cur = desk(5, 1, vec![ds("a", 0)]);
+        let higher = desk(5, 2, vec![ds("b", 0)]);
+        assert_eq!(adopt(&cur, higher.clone()), Ok(Some(higher)));
+        assert_eq!(adopt(&cur, desk(5, 0, vec![ds("c", 0)])), Ok(None));
+    }
+
+    #[test]
+    fn newer_but_invalid_desk_is_rejected() {
+        let cur = desk(1, 1, vec![ds("a", 0)]);
+        let overlapping = desk(9, 1, vec![ds("a", 0), ds("b", 50)]);
+        assert_eq!(
+            adopt(&cur, overlapping),
+            Err(LayoutError::Overlap("a".into(), "b".into()))
+        );
+    }
+
+    #[test]
+    fn local_edit_outranks_current_everywhere() {
+        let cur = desk(7, 200, vec![ds("a", 0)]);
+        let mine = edit(&cur, PeerId([1; 16]), vec![ds("a", 0), ds("b", 100)]);
+        assert_eq!((mine.version, mine.author), (8, PeerId([1; 16])));
+        assert_eq!(adopt(&cur, mine.clone()), Ok(Some(mine)));
     }
 }

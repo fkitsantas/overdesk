@@ -118,10 +118,31 @@ pub enum Control {
         code: u32,
         pressed: bool,
     },
+    /// Replicated Desk layout (ARCHITECTURE §3).
+    Desk(Desk),
     /// Interim: plain text. Replaced by lazy offer/request clipboard (ARCHITECTURE §6).
     Clipboard {
         text: String,
     },
+}
+
+/// One screen in the shared logical plane, owned by `peer`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeskScreen {
+    pub peer: PeerId,
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// The replicated Desk document. Carries layout only, never trust.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Desk {
+    pub version: u64,
+    pub author: PeerId,
+    pub screens: Vec<DeskScreen>,
 }
 
 /// Pre-trust handshake (ARCHITECTURE §7). Its own type, so an unpaired peer cannot
