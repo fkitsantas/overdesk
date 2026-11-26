@@ -118,16 +118,296 @@ pub struct Engine {
 impl Engine {
     /// `os` maps every device on the Desk (including this one) to its OS.
     /// `None` if the Desk is invalid or this device has no screen on it.
-    pub fn new(_me: PeerId, _desk: &Desk, _os: BTreeMap<PeerId, Os>) -> Option<Self> {
-        todo!()
+    pub fn new(me: PeerId, desk: &Desk, os: BTreeMap<PeerId, Os>) -> Option<Self> {
+        let layout = desk_layout(desk).ok()?;
+        let screens: Vec<PeerId> = desk.screens.iter().map(|s| s.peer).collect();
+        let start = screens.iter().position(|p| *p == me)?;
+        Some(Self {
+            me,
+            os,
+            switcher: Switcher::new(layout, start)?,
+            screens,
+            mode: Mode::Local,
+            sent_keys: HeldKeys::default(),
+            sent_buttons: Vec::new(),
+            local_buttons: Vec::new(),
+            seq: 0,
+            gate: SeqGate::default(),
+            mode_since_ms: 0,
+        })
     }
 
     pub fn mode(&self) -> Mode {
         self.mode
     }
 
-    pub fn handle(&mut self, _event: Event, _now_ms: u64) -> Vec<Action> {
-        todo!()
+    pub fn handle(&mut self, event: Event, now_ms: u64) -> Vec<Action> {
+        match self.mode {
+            Mode::Local => self.local(event, now_ms),
+            Mode::Driving(peer) => self.driving(peer, event, now_ms),
+            Mode::Driven(peer) => self.driven(peer, event, now_ms),
+        }
+    }
+
+    fn my_screen(&self) -> usize {
+        self.screens.iter().position(|p| *p == self.me).expect("checked in new")
+    }
+
+    fn others(&self) -> impl Iterator<Item = PeerId> + '_ {
+        self.os.keys().copied().filter(move |p| *p != self.me)
+    }
+
+    /// Tells every other device where the cursor is now. Motion of this focus period
+    /// starts at the current seq.
+    fn broadcast_focus(&self, peer: PeerId, x: i32, y: i32, out: &mut Vec<Action>) {
+        let msg = Control::Focus {
+            peer,
+            x,
+            y,
+            seq: self.seq,
+        };
+        out.extend(self.others().map(|to| Action::Send { to, msg: msg.clone() }));
+    }
+
+    /// Releases everything we hold down on `peer`.
+    fn release_sent(&mut self, peer: PeerId, out: &mut Vec<Action>) {
+        for code in self.sent_keys.release_all() {
+            out.push(Action::Send {
+                to: peer,
+                msg: Control::Key { code, pressed: false },
+            });
+        }
+        let (_, x, y) = self.switcher.local();
+        for button in std::mem::take(&mut self.sent_buttons) {
+            out.push(Action::Send {
+                to: peer,
+                msg: Control::Button {
+                    button,
+                    pressed: false,
+                    x,
+                    y,
+                },
+            });
+        }
+    }
+
+    fn track_local_button(&mut self, button: Button, pressed: bool) {
+        self.local_buttons.retain(|b| *b != button);
+        if pressed {
+            self.local_buttons.push(button);
+        }
+    }
+
+    fn enter_driven(&mut self, from: PeerId, x: i32, y: i32, seq: u32, now_ms: u64) -> Vec<Action> {
+        self.mode = Mode::Driven(from);
+        self.mode_since_ms = now_ms;
+        self.gate = SeqGate::default();
+        self.gate.start_at(seq);
+        self.switcher.set_local(self.my_screen(), x, y);
+        vec![Action::InjectMove { x, y }]
+    }
+
+    fn local(&mut self, event: Event, now_ms: u64) -> Vec<Action> {
+        match event {
+            Event::LocalMove { dx, dy, x, y } => {
+                let me = self.my_screen();
+                self.switcher.set_local(me, x, y);
+                if !self.local_buttons.is_empty() {
+                    return vec![];
+                }
+                // The OS cursor stops at the screen edge; only the part of the delta
+                // pushing outward can carry it onto a neighbour.
+                let r = self.switcher.layout().screens()[me].rect;
+                let (w, h) = (r.w as i32, r.h as i32);
+                let push_x = if (x >= w - 1 && dx > 0) || (x <= 0 && dx < 0) {
+                    dx
+                } else {
+                    0
+                };
+                let push_y = if (y >= h - 1 && dy > 0) || (y <= 0 && dy < 0) {
+                    dy
+                } else {
+                    0
+                };
+                if (push_x, push_y) == (0, 0) {
+                    return vec![];
+                }
+                match self.switcher.move_by(push_x, push_y) {
+                    Move::Switched { to, x, y, .. } => {
+                        let peer = self.screens[to];
+                        self.mode = Mode::Driving(peer);
+                        self.mode_since_ms = now_ms;
+                        let mut out = Vec::new();
+                        self.broadcast_focus(peer, x, y, &mut out);
+                        out.push(Action::Swallow(true));
+                        out
+                    }
+                    Move::Within { .. } => vec![],
+                }
+            }
+            Event::LocalButton { button, pressed } => {
+                self.track_local_button(button, pressed);
+                vec![]
+            }
+            Event::Peer {
+                from,
+                msg: Control::Focus { peer, x, y, seq },
+            } if peer == self.me => self.enter_driven(from, x, y, seq, now_ms),
+            _ => vec![],
+        }
+    }
+
+    fn leave_driving(&mut self, peer: PeerId, out: &mut Vec<Action>) {
+        self.release_sent(peer, out);
+        out.push(Action::Swallow(false));
+        self.mode = Mode::Local;
+    }
+
+    fn driving(&mut self, peer: PeerId, event: Event, now_ms: u64) -> Vec<Action> {
+        let mut out = Vec::new();
+        match event {
+            Event::LocalMove { dx, dy, .. } => {
+                // Local cursor is frozen while swallowed: dead-reckon on the peer's screen.
+                let held = !self.sent_buttons.is_empty();
+                let before = self.switcher.local();
+                match self.switcher.move_by(dx, dy) {
+                    Move::Switched { .. } if held => {
+                        // No screen changes mid-drag: undo and stay on the edge.
+                        self.switcher.set_local(before.0, before.1, before.2);
+                    }
+                    Move::Switched { to, x, y, .. } if self.screens[to] == self.me => {
+                        self.leave_driving(peer, &mut out);
+                        self.broadcast_focus(self.me, x, y, &mut out);
+                        out.push(Action::InjectMove { x, y });
+                    }
+                    Move::Switched { to, x, y, .. } => {
+                        self.release_sent(peer, &mut out);
+                        let next = self.screens[to];
+                        self.mode = Mode::Driving(next);
+                        self.mode_since_ms = now_ms;
+                        self.broadcast_focus(next, x, y, &mut out);
+                    }
+                    Move::Within { x, y, .. } => {
+                        out.push(Action::SendMotion {
+                            to: peer,
+                            motion: Motion { seq: self.seq, x, y },
+                        });
+                        self.seq = self.seq.wrapping_add(1);
+                    }
+                }
+            }
+            Event::LocalKey { code, pressed } => {
+                if pressed {
+                    self.sent_keys.press(code);
+                } else {
+                    self.sent_keys.release(code);
+                }
+                out.push(Action::Send {
+                    to: peer,
+                    msg: Control::Key { code, pressed },
+                });
+            }
+            Event::LocalButton { button, pressed } => {
+                self.sent_buttons.retain(|b| *b != button);
+                if pressed {
+                    self.sent_buttons.push(button);
+                }
+                let (_, x, y) = self.switcher.local();
+                out.push(Action::Send {
+                    to: peer,
+                    msg: Control::Button { button, pressed, x, y },
+                });
+            }
+            Event::LocalScroll { dx, dy, unit, phase } => {
+                out.push(Action::Send {
+                    to: peer,
+                    msg: Control::Scroll { dx, dy, unit, phase },
+                });
+            }
+            Event::Escape => {
+                self.leave_driving(peer, &mut out);
+                let (_, x, y) = self.switcher.local();
+                self.switcher.set_local(self.my_screen(), x, y);
+                self.broadcast_focus(self.me, x, y, &mut out);
+            }
+            Event::PeerLost(lost) if lost == peer => {
+                self.sent_keys.release_all();
+                self.sent_buttons.clear();
+                out.push(Action::Swallow(false));
+                self.mode = Mode::Local;
+            }
+            // Another device became the source: our hand left the mouse.
+            Event::Peer {
+                from,
+                msg: Control::Focus { peer: focus, x, y, seq },
+            } => {
+                self.leave_driving(peer, &mut out);
+                if focus == self.me {
+                    out.extend(self.enter_driven(from, x, y, seq, now_ms));
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+
+    fn driven(&mut self, driver: PeerId, event: Event, now_ms: u64) -> Vec<Action> {
+        let held = now_ms.saturating_sub(self.mode_since_ms) < TAKEOVER_HOLD_MS;
+        let takeover = |me: &mut Self, x: i32, y: i32| {
+            me.mode = Mode::Local;
+            me.switcher.set_local(me.my_screen(), x, y);
+            let mut out = vec![Action::ReleaseAll];
+            me.broadcast_focus(me.me, x, y, &mut out);
+            out
+        };
+        match event {
+            Event::Peer { from, msg } if from == driver => match msg {
+                Control::Focus { peer, x, y, seq } if peer == self.me => {
+                    self.gate.start_at(seq);
+                    self.switcher.set_local(self.my_screen(), x, y);
+                    vec![Action::InjectMove { x, y }]
+                }
+                Control::Focus { .. } => {
+                    self.mode = Mode::Local;
+                    vec![Action::ReleaseAll]
+                }
+                Control::Key { code, pressed } => {
+                    let from_os = self.os.get(&from).copied().unwrap_or(Os::Linux);
+                    let to_os = self.os.get(&self.me).copied().unwrap_or(Os::Linux);
+                    vec![Action::InjectKey {
+                        code: remap_key(code, from_os, to_os),
+                        pressed,
+                    }]
+                }
+                Control::Button { button, pressed, x, y } => {
+                    self.switcher.set_local(self.my_screen(), x, y);
+                    vec![Action::InjectMove { x, y }, Action::InjectButton { button, pressed }]
+                }
+                Control::Scroll { dx, dy, unit, phase } => vec![Action::InjectScroll { dx, dy, unit, phase }],
+                _ => vec![],
+            },
+            Event::PeerMotion { from, motion } if from == driver && self.gate.accept(motion.seq) => {
+                self.switcher.set_local(self.my_screen(), motion.x, motion.y);
+                vec![Action::InjectMove {
+                    x: motion.x,
+                    y: motion.y,
+                }]
+            }
+            Event::PeerLost(lost) if lost == driver => {
+                self.mode = Mode::Local;
+                vec![Action::ReleaseAll]
+            }
+            Event::LocalMove { dx, dy, x, y } if !held && dx.abs() + dy.abs() >= TAKEOVER_MIN_MOVE => {
+                takeover(self, x, y)
+            }
+            Event::LocalKey { pressed: true, .. } | Event::LocalButton { pressed: true, .. } | Event::Escape
+                if !held || event == Event::Escape =>
+            {
+                let (_, x, y) = self.switcher.local();
+                takeover(self, x, y)
+            }
+            _ => vec![],
+        }
     }
 }
 
