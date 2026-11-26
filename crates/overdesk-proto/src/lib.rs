@@ -32,7 +32,7 @@ pub enum Os {
     Android,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Button {
     Left,
     Right,
@@ -186,7 +186,8 @@ pub fn decode_motion(datagram: &[u8]) -> Result<Motion, FrameError> {
 }
 
 /// Accepts only motion newer than the last accepted one, using wrap-safe
-/// serial-number arithmetic so `seq` may overflow freely.
+/// serial-number arithmetic so `seq` may overflow freely. Create one per connection:
+/// a restarted sender reconnects, so it never meets a stale gate.
 #[derive(Debug, Default)]
 pub struct SeqGate {
     last: Option<u32>,

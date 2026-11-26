@@ -153,6 +153,39 @@ impl ClickCounter {
     }
 }
 
+/// Something that can be held down locally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Held {
+    Key(u32),
+    Button(Button),
+}
+
+/// Decides whether a captured press/release also reaches local apps. Releases of
+/// anything pressed while local input was live always pass, so turning swallowing on
+/// mid-press can never leave a key or drag stuck on this Mac.
+#[derive(Debug, Default)]
+pub struct LocalDowns(std::collections::BTreeSet<Held>);
+
+impl LocalDowns {
+    pub fn deliver_locally(&mut self, _held: Held, _down: bool, _swallowing: bool) -> bool {
+        todo!()
+    }
+}
+
+/// Carries fractional mouse deltas between events so slow, precise trackpad and
+/// Magic Mouse motion is not rounded away.
+#[derive(Debug, Default)]
+pub struct Subpixel {
+    rx: f64,
+    ry: f64,
+}
+
+impl Subpixel {
+    pub fn feed(&mut self, _dx: f64, _dy: f64) -> (i32, i32) {
+        todo!()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,5 +290,49 @@ mod tests {
         assert_eq!(c.press(Button::Left, 501, 0, 0, 500), 1, "too slow");
         assert_eq!(c.press(Button::Left, 600, CLICK_SLOP + 1, 0, 500), 1, "too far");
         assert_eq!(c.press(Button::Right, 700, CLICK_SLOP + 1, 0, 500), 1, "other button");
+    }
+
+    #[test]
+    fn release_of_locally_pressed_key_passes_while_swallowing() {
+        let mut l = LocalDowns::default();
+        assert!(l.deliver_locally(Held::Key(0xE3), true, false));
+        assert!(
+            l.deliver_locally(Held::Key(0xE3), false, true),
+            "Cmd would stick on the Mac"
+        );
+    }
+
+    #[test]
+    fn input_while_swallowing_stays_off_this_mac() {
+        let mut l = LocalDowns::default();
+        assert!(!l.deliver_locally(Held::Button(Button::Left), true, true));
+        assert!(!l.deliver_locally(Held::Button(Button::Left), false, true));
+    }
+
+    #[test]
+    fn local_input_flows_when_not_swallowing() {
+        let mut l = LocalDowns::default();
+        // Release of a key pressed before capture started.
+        assert!(l.deliver_locally(Held::Key(0x04), false, false));
+        assert!(l.deliver_locally(Held::Key(0x04), true, false));
+        assert!(l.deliver_locally(Held::Key(0x04), false, false));
+        // Already released: a later release while swallowing is not local.
+        assert!(!l.deliver_locally(Held::Key(0x04), false, true));
+    }
+
+    #[test]
+    fn subpixel_accumulates_fractions() {
+        let mut s = Subpixel::default();
+        assert_eq!(s.feed(0.4, 0.0), (0, 0));
+        assert_eq!(s.feed(0.4, 0.0), (0, 0));
+        assert_eq!(s.feed(0.4, 0.0), (1, 0));
+        assert_eq!(s.feed(-0.6, -0.6), (0, 0));
+        assert_eq!(s.feed(-0.6, -0.6), (-1, -1));
+    }
+
+    #[test]
+    fn subpixel_passes_whole_deltas() {
+        let mut s = Subpixel::default();
+        assert_eq!(s.feed(-42.0, 9.0), (-42, 9));
     }
 }
