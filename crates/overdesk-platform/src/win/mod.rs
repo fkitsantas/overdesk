@@ -3,3 +3,6 @@
 
 pub mod events;
 pub mod keymap;
+
+#[cfg(windows)]
+pub mod ffi;

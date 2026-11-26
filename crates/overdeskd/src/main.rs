@@ -107,23 +107,27 @@ impl Platform for Headless {
     }
 }
 
-#[cfg(target_os = "macos")]
-mod mac {
+/// The OS adapter: macOS and Windows expose the same `Capture` / `Injector` API.
+#[cfg(any(target_os = "macos", windows))]
+mod native {
     use std::sync::Arc;
     use std::sync::mpsc::{Sender, channel};
 
     use overdesk_core::engine::Action;
-    use overdesk_platform::mac::ffi::{Capture, Injector};
+    #[cfg(target_os = "macos")]
+    pub use overdesk_platform::mac::ffi::{Capture, Injector, main_display_size};
+    #[cfg(windows)]
+    pub use overdesk_platform::win::ffi::{Capture, Injector, main_display_size};
 
     use super::Slot;
 
     #[derive(Clone)]
-    pub struct MacPlatform {
+    pub struct NativePlatform {
         capture: Arc<Capture>,
         inject: Sender<Action>,
     }
 
-    impl MacPlatform {
+    impl NativePlatform {
         pub fn start(slot: Slot) -> Result<Self, String> {
             let (capture, events) = Capture::start().map_err(|e| format!("capture: {e:?}"))?;
             std::thread::Builder::new()
@@ -138,7 +142,7 @@ mod mac {
                 .map_err(|e| e.to_string())?;
             let (inject, actions) = channel::<Action>();
             let (ready_tx, ready) = channel::<Result<(), String>>();
-            // The Quartz event source is not Send: create and use it on one thread.
+            // The injector (a Quartz event source on macOS) stays on one thread.
             std::thread::Builder::new()
                 .name("overdesk-inject".into())
                 .spawn(move || {
@@ -174,7 +178,7 @@ mod mac {
         }
     }
 
-    impl super::Platform for MacPlatform {
+    impl super::Platform for NativePlatform {
         fn swallow(&self, on: bool) {
             self.capture.set_swallow(on);
         }
@@ -222,7 +226,10 @@ async fn session(mut link: Link, store: &Store, args: &Args, me: &Me, platform: 
     let pins = store.pins().unwrap_or_default();
     match establish(link, |fp| pins.contains(fp), me, args.side).await {
         Ok(s) => {
-            println!("Connected to {}. Escape hatch: Ctrl+Option+Cmd+Esc.", s.peer_name);
+            println!(
+                "Connected to {}. Escape hatch: Ctrl+Option+Cmd+Esc (Ctrl+Alt+Win+Esc on Windows).",
+                s.peer_name
+            );
             let (tx, rx) = unbounded_channel();
             *slot.lock().expect("slot lock") = Some(tx);
             run(s, rx, platform).await;
@@ -297,20 +304,21 @@ async fn main() -> ExitCode {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 async fn start_native(args: Args, slot: Slot) -> Result<(), String> {
-    let (width, height) = overdesk_platform::mac::ffi::main_display_size();
+    let (width, height) = native::main_display_size();
+    let os = if cfg!(windows) { Os::Windows } else { Os::MacOs };
     let me = Me {
         name: args.name.clone(),
-        os: Os::MacOs,
+        os,
         width,
         height,
     };
-    let platform = mac::MacPlatform::start(slot.clone())?;
+    let platform = native::NativePlatform::start(slot.clone())?;
     serve(args, platform, slot, me).await
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 async fn start_native(_args: Args, _slot: Slot) -> Result<(), String> {
     Err("no input adapter for this OS yet; use --headless".into())
 }

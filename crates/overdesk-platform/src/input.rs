@@ -55,6 +55,32 @@ impl EscapeChord {
     }
 }
 
+/// Something that can be held down locally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Held {
+    Key(u32),
+    Button(Button),
+}
+
+/// Decides whether a captured press/release also reaches local apps. Releases of
+/// anything pressed while local input was live always pass, so turning swallowing on
+/// mid-press can never leave a key or drag stuck on this Mac.
+#[derive(Debug, Default)]
+pub struct LocalDowns(BTreeSet<Held>);
+
+impl LocalDowns {
+    pub fn deliver_locally(&mut self, held: Held, down: bool, swallowing: bool) -> bool {
+        if down {
+            if !swallowing {
+                self.0.insert(held);
+            }
+            !swallowing
+        } else {
+            self.0.remove(&held) || !swallowing
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
