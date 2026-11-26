@@ -8,7 +8,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use cargo_packager_updater::{Config, Update, check_update};
+use base64::Engine;
+use cargo_packager_updater::semver::Version;
+use cargo_packager_updater::{Config, Update, UpdaterBuilder};
 use overdeskd::controller::Phase;
 
 use overdesk_core::engine::Mode;
@@ -157,7 +159,13 @@ fn check_blocking() -> Option<Staged> {
         pubkey: PUBKEY.trim().into(),
         ..Default::default()
     };
-    let update = match check_update(VERSION.parse().ok()?, config) {
+    let current: Version = VERSION.parse().ok()?;
+    let checked = UpdaterBuilder::new(current.clone(), config)
+        // Refuse anything that is not strictly newer than the running version.
+        .version_comparator(|current, release| release.version > current)
+        .build()
+        .and_then(|updater| updater.check());
+    let update = match checked {
         Ok(Some(update)) => update,
         Ok(None) => return None,
         Err(e) => {
@@ -168,6 +176,11 @@ fn check_blocking() -> Option<Staged> {
     // `download` verifies the signature before returning the bytes.
     match update.download() {
         Ok(bytes) => {
+            // The manifest is unsigned: bind its version to the signed file name.
+            if let Err(why) = vet(&update.signature, &update.version, &current) {
+                eprintln!("overdesk: update discarded: {why}");
+                return None;
+            }
             eprintln!("overdesk: update {} downloaded and verified", update.version);
             Some(Staged { update, bytes })
         }
@@ -178,6 +191,32 @@ fn check_blocking() -> Option<Staged> {
     }
 }
 
+/// The version embedded in the signed file name of a minisign signature (base64 of the
+/// `.sig` file). The trusted comment `timestamp:<n>\tfile:<name>` is covered by the global
+/// signature, and `<name>` is `<product>_<version>_<rest>`. `None` if any of that is missing.
+fn signed_version(signature_b64: &str) -> Option<Version> {
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(signature_b64.trim())
+        .ok()?;
+    let text = String::from_utf8(raw).ok()?;
+    let trusted = text.lines().find_map(|l| l.strip_prefix("trusted comment:"))?;
+    let name = trusted.split('\t').find_map(|f| f.trim().strip_prefix("file:"))?;
+    name.split('_').nth(1)?.parse().ok()
+}
+
+/// Decides whether a verified download may be staged: the signed version must exist, equal
+/// the manifest's `offered` version and be strictly newer than `current`. The error says why not.
+fn vet(signature_b64: &str, offered: &str, current: &Version) -> Result<(), String> {
+    let signed = signed_version(signature_b64).ok_or("signature carries no readable version")?;
+    if signed.to_string() != offered {
+        return Err(format!("manifest offers {offered} but the signed artifact is {signed}"));
+    }
+    if signed <= *current {
+        return Err(format!("{signed} is not newer than {current}"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
@@ -185,7 +224,63 @@ mod tests {
     use overdesk_core::engine::Mode;
     use overdeskd::controller::Phase;
 
-    use super::{install_allowed, is_on};
+    use base64::Engine;
+    use cargo_packager_updater::semver::Version;
+
+    use super::{install_allowed, is_on, signed_version, vet};
+
+    /// A minisign signature file (as cargo-packager writes it) with the given trusted comment,
+    /// base64-encoded the way `latest.json` carries it.
+    fn sig(trusted: &str) -> String {
+        let file =
+            format!("untrusted comment: signature from cargo-packager secret key\nRUTZe/AAAA\n{trusted}\nmS0UF5AAAA\n");
+        base64::engine::general_purpose::STANDARD.encode(file)
+    }
+
+    /// The trusted comment cargo-packager writes for an artifact file name.
+    fn comment(file: &str) -> String {
+        format!("trusted comment: timestamp:1795700885\tfile:{file}")
+    }
+
+    fn v(s: &str) -> Version {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn signed_version_reads_the_file_name() {
+        let s = sig(&comment("Overdesk_0.1.1_aarch64.app.tar.gz"));
+        assert_eq!(signed_version(&s), Some(v("0.1.1")));
+        let s = sig(&comment("Overdesk_2.10.3-beta.1_x64-setup.exe"));
+        assert_eq!(signed_version(&s), Some(v("2.10.3-beta.1")));
+    }
+
+    #[test]
+    fn garbage_or_missing_comments_are_rejected() {
+        assert_eq!(signed_version(""), None);
+        assert_eq!(signed_version("not base64 !!"), None);
+        assert_eq!(signed_version(&sig("")), None);
+        assert_eq!(signed_version(&sig("trusted comment: timestamp:1")), None);
+        assert_eq!(signed_version(&sig(&comment("Overdesk.app.tar.gz"))), None);
+        assert_eq!(signed_version(&sig(&comment("Overdesk_latest_aarch64.tar.gz"))), None);
+        // an unsigned (untrusted) comment must not count
+        let forged = sig("untrusted comment: timestamp:1\tfile:Overdesk_9.9.9_x.tar.gz");
+        assert_eq!(signed_version(&forged), None);
+    }
+
+    #[test]
+    fn only_a_signed_strictly_newer_matching_version_passes() {
+        let signed = |f: &str| sig(&comment(f));
+        let cur = v("0.1.0");
+        assert!(vet(&signed("Overdesk_0.1.1_a.tar.gz"), "0.1.1", &cur).is_ok());
+        // manifest claims newer than what was signed (the downgrade attack)
+        assert!(vet(&signed("Overdesk_0.1.1_a.tar.gz"), "0.1.2", &cur).is_err());
+        // equal and older
+        assert!(vet(&signed("Overdesk_0.1.0_a.tar.gz"), "0.1.0", &cur).is_err());
+        assert!(vet(&signed("Overdesk_0.0.9_a.tar.gz"), "0.0.9", &cur).is_err());
+        // unparseable
+        assert!(vet(&signed("Overdesk.app.tar.gz"), "0.1.1", &cur).is_err());
+        assert!(vet("junk", "0.1.1", &cur).is_err());
+    }
 
     #[test]
     fn policy_flags_parse() {

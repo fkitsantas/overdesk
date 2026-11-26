@@ -8,14 +8,16 @@ cd "$(dirname "$0")/.."
 OUT=${1:?out dir}; BASE=${2:?artifact base url, e.g. https://overdesk.org/updates/files}
 VERSION=${OVERDESK_VERSION:-$(cargo pkgid -p overdesk-app | sed 's/.*[#@]//')}
 case "$(uname -s)" in
-  Darwin) TARGET=macos; FORMAT=app; ART="Overdesk.app.tar.gz";;
+  Darwin) TARGET=macos; FORMAT=app; ART="";; # versioned name set once ARCH is known
   *) TARGET=windows; FORMAT=nsis; ART=$(cd target/packages && ls Overdesk_"${VERSION}"_*-setup.exe);;
 esac
 case "$(uname -m)" in arm64|aarch64) ARCH=aarch64;; *) ARCH=x86_64;; esac
+# package.sh signs the macOS archive under its versioned name; publish it under that same name.
+[ -z "$ART" ] && ART="Overdesk_${VERSION}_${ARCH}.app.tar.gz"
 SRC=target/packages/$ART
 [ -f "$SRC.sig" ] || { echo "missing $SRC.sig: package with the signing key first" >&2; exit 1; }
 DEST="$OUT/$TARGET/$ARCH"; mkdir -p "$DEST"
-NAME="Overdesk_${VERSION}_${ARCH}_${ART}"
+NAME="$ART" # the published name is exactly the signed name
 cp "$SRC" "$DEST/$NAME"; cp "$SRC.sig" "$DEST/$NAME.sig"
 printf '{"version":"%s","url":"%s/%s/%s/%s","signature":"%s","format":"%s"}\n' \
   "$VERSION" "$BASE" "$TARGET" "$ARCH" "$NAME" "$(tr -d '\n' < "$SRC.sig")" "$FORMAT" > "$DEST/latest.json"

@@ -3659,6 +3659,7 @@ dependencies = [
 name = "overdesk-app"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "cargo-packager-updater",
  "iced",
  "overdesk-core",
