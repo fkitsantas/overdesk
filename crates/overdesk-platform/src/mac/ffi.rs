@@ -244,7 +244,12 @@ fn run_tap(tx: Sender<Captured>, swallow: Arc<AtomicBool>, stop: Arc<AtomicBool>
         CGEventType::OtherMouseDragged,
         // NSEventType rotate (18), magnify (30), smartMagnify (32): public AppKit
         // numbers, which Quartz uses as event types; the tap mask is just a bit per type.
+        // Trackpad gestures may also arrive as the private gesture type 29 (kCGSEventGesture),
+        // which AppKit decodes to the same magnify/rotate events.
+        // shortcut: if a real pinch arrives as both 29 and 30, it is counted twice; drop one
+        // type once a hand test shows which the tap receives.
         CGEventType(18),
+        CGEventType(29),
         CGEventType(30),
         CGEventType(32),
     ]
@@ -495,7 +500,7 @@ fn translate(ty: CGEventType, ev: &CGEvent, ctx: &TapCtx) -> Option<(Held, bool)
             });
             None
         }
-        CGEventType(18) | CGEventType(30) | CGEventType(32) => {
+        CGEventType(18) | CGEventType(29) | CGEventType(30) | CGEventType(32) => {
             gesture(ev, |gesture, phase| send(Captured::Gesture { gesture, phase }));
             None
         }
@@ -535,6 +540,38 @@ fn gesture(ev: &CGEvent, out: impl FnOnce(Gesture, Phase)) {
     out(g, phase);
 }
 
+/// Builds a synthetic trackpad gesture event.
+///
+/// PRIVATE, UNDOCUMENTED API (like the CGS calls above): macOS has no public way to post
+/// a pinch or rotate, so this writes the event type (`kCGSEventGesture`, 29) and the
+/// gesture fields that WindowServer itself uses. It rules out the Mac App Store and may
+/// break in any future macOS release; the only effect then is that gestures do nothing.
+/// The numbers come from Apple's open-source WebKit test SPI header
+/// (Tools/TestRunnerShared/spi/CoreGraphicsTestSPI.h: `kCGSEventGesture` 29,
+/// `kCGEventGestureHIDType` 110, `kCGEventGestureZoomValue` 113,
+/// `kCGEventGestureRotationValue` 114, `kCGEventGesturePhase` 132), WebKitTestRunner's
+/// use of HID type 8 (`kIOHIDEventTypeZoom`), IOKit's `IOHIDEventTypes.h` (rotation = 5) and
+/// the public `CGGesturePhase` values in CoreGraphics' CGEventTypes.h.
+fn private_gesture_event(source: &CGEventSource, gesture: Gesture, phase: Phase) -> Option<CFRetained<CGEvent>> {
+    const GESTURE_TYPE: u32 = 29; // kCGSEventGesture
+    const HID_TYPE: CGEventField = CGEventField(110);
+    const ZOOM_VALUE: CGEventField = CGEventField(113);
+    const ROTATION_VALUE: CGEventField = CGEventField(114);
+    const PHASE: CGEventField = CGEventField(132);
+    let ev = CGEvent::new(Some(source))?;
+    CGEvent::set_type(Some(&ev), CGEventType(GESTURE_TYPE));
+    let (hid, value_field, value) = match gesture {
+        Gesture::Magnify { milli } => (8, ZOOM_VALUE, f64::from(milli) / 1000.0),
+        Gesture::Rotate { millideg } => (5, ROTATION_VALUE, f64::from(millideg) / 1000.0),
+        Gesture::SmartZoom => return None, // shortcut: no known event shape for smart zoom; add when found
+    };
+    CGEvent::set_integer_value_field(Some(&ev), HID_TYPE, hid);
+    CGEvent::set_double_value_field(Some(&ev), value_field, value);
+    // Same bit values as the public CGGesturePhase scroll phases.
+    CGEvent::set_integer_value_field(Some(&ev), PHASE, phase_to_cg(phase).0);
+    Some(ev)
+}
+
 /// Posts input that apps cannot tell apart from real Apple hardware.
 pub struct Injector {
     /// `kCGEventSourceStateHIDSystemState` source, so posted events update the same
@@ -552,6 +589,8 @@ pub struct Injector {
     /// Last position this injector moved the pointer to (global points); presses and
     /// releases are posted here.
     pos: CGPoint,
+    /// Magnify or rotate gesture begun but not yet ended; `release_all` ends it.
+    open_gesture: Option<Gesture>,
     /// Time origin for the click counter's millisecond timestamps.
     epoch: Instant,
     /// Top-left of the desktop box when the injector was created, added to box-relative targets.
@@ -577,6 +616,7 @@ impl Injector {
             clicks: ClickCounter::default(),
             last_click_count: 1,
             pos,
+            open_gesture: None,
             epoch: Instant::now(),
             origin: {
                 let (x, y, _, _) = desktop_bounds();
@@ -629,9 +669,12 @@ impl Injector {
         (p.x - f64::from(ox), p.y - f64::from(oy))
     }
 
-    /// Releases every key and button this injector holds down. Call when focus leaves
-    /// this Mac or the peer driving it disconnects.
+    /// Releases every key and button this injector holds down and ends any gesture left
+    /// open. Call when focus leaves this Mac or the peer driving it disconnects.
     pub fn release_all(&mut self) {
+        if let Some(g) = self.open_gesture {
+            self.gesture(g, Phase::Ended);
+        }
         for code in self.keys.clone().into_iter().rev() {
             self.key(code, false);
         }
@@ -699,10 +742,16 @@ impl Injector {
         }
     }
 
-    /// Does nothing: macOS has no public API to post a magnify, rotate or smart-zoom event
-    /// (only private CGEvent fields), so Mac receivers ignore gestures until the owner
-    /// approves private APIs.
-    pub fn gesture(&mut self, _gesture: Gesture, _phase: Phase) {}
+    /// Posts a trackpad magnify, rotate or smart-zoom gesture event (see [`private_gesture_event`]),
+    /// remembering an unfinished gesture so [`Self::release_all`] can end it.
+    pub fn gesture(&mut self, gesture: Gesture, phase: Phase) {
+        self.open_gesture = matches!(phase, Phase::Began | Phase::Changed | Phase::MayBegin)
+            .then_some(gesture)
+            .filter(|g| !matches!(g, Gesture::SmartZoom));
+        if let Some(ev) = private_gesture_event(&self.source, gesture, phase) {
+            self.post(&ev);
+        }
+    }
 
     /// Posts one scroll event with its gesture/momentum phase, so trackpad scrolling
     /// with inertia and rubber-banding looks native. Pixel deltas are marked continuous
@@ -740,4 +789,28 @@ pub fn clipboard_is_private() -> bool {
     ];
     let types = NSPasteboard::generalPasteboard().types();
     types.is_some_and(|t| t.iter().any(|ty| MARKERS.contains(&ty.to_string().as_str())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// AppKit must read our synthetic events back as the same gesture.
+    #[test]
+    fn gesture_roundtrip() {
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState).unwrap();
+        for (g, ty) in [
+            (Gesture::Magnify { milli: 123 }, NSEventType::Magnify),
+            (Gesture::Rotate { millideg: -4500 }, NSEventType::Rotate),
+        ] {
+            let ev = private_gesture_event(&source, g, Phase::Changed).unwrap();
+            let ns = NSEvent::eventWithCGEvent(&ev).unwrap();
+            assert_eq!(ns.r#type(), ty);
+            assert!(ns.phase().contains(NSEventPhase::Changed));
+            match g {
+                Gesture::Magnify { .. } => assert!((ns.magnification() - 0.123).abs() < 1e-6),
+                _ => assert!((f64::from(ns.rotation()) + 4.5).abs() < 1e-3, "{}", ns.rotation()),
+            }
+        }
+    }
 }

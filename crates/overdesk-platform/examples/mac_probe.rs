@@ -3,13 +3,14 @@
 //!
 //!   cargo run -p overdesk-platform --example mac_probe -- listen [secs]   # print captured input (default 10 s)
 //!   cargo run -p overdesk-platform --example mac_probe -- inject   # draw a small square, scroll, tap Shift
+//!   cargo run -p overdesk-platform --example mac_probe -- inject-gesture   # pinch in, pinch out, rotate (hover over Preview/Safari/Maps)
 //!   cargo run -p overdesk-platform --example mac_probe -- jump     # inject a jump, then print your next real moves
 
 /// Checks both permissions, then runs the subcommand named by the first argument.
 #[cfg(target_os = "macos")]
 fn main() {
     use overdesk_platform::mac::ffi::{Capture, Injector, permissions, request_permissions};
-    use overdesk_proto::{Phase, ScrollUnit};
+    use overdesk_proto::{Gesture, Phase, ScrollUnit};
     use std::time::{Duration, Instant};
 
     let (listen, post) = permissions();
@@ -72,6 +73,26 @@ fn main() {
             inj.key(0xE1, false);
             println!("Injected square, pixel scroll with momentum, Shift tap.");
         }
+        Some("inject-gesture") => {
+            let mut inj = Injector::new().expect("injector");
+            println!("Hover over a zoomable image or page; starting in 3 s...");
+            std::thread::sleep(Duration::from_secs(3));
+            // 60 steps of 16 ms each: pinch in 1% per step, then out, then rotate 30 degrees.
+            let mut run = |g: Gesture| {
+                for (i, phase) in std::iter::once(Phase::Began)
+                    .chain(std::iter::repeat_n(Phase::Changed, 58))
+                    .chain([Phase::Ended])
+                    .enumerate()
+                {
+                    inj.gesture(if i == 0 { Gesture::Magnify { milli: 0 } } else { g }, phase);
+                    std::thread::sleep(Duration::from_millis(16));
+                }
+            };
+            run(Gesture::Magnify { milli: -10 });
+            run(Gesture::Magnify { milli: 10 });
+            run(Gesture::Rotate { millideg: 500 });
+            println!("Injected pinch in, pinch out, rotate 29 degrees (58 x 0.5).");
+        }
         Some("jump") => {
             // Does the first real delta after an injected jump carry the jump itself?
             let (_capture, rx) = Capture::start().expect("tap");
@@ -91,7 +112,7 @@ fn main() {
                 }
             }
         }
-        _ => println!("usage: mac_probe listen|inject|jump"),
+        _ => println!("usage: mac_probe listen|inject|inject-gesture|jump"),
     }
 }
 
