@@ -70,9 +70,9 @@ computer you're sitting at.
 </td>
 <td valign="top">
 
-### 📋 Clipboard on demand
-A copy only announces what it holds. Bytes move when you paste, so a 50 MB screenshot
-costs nothing until you use it.
+### 📋 Shared clipboard
+Copy text on one computer and paste it on the other. Copies a password manager marks as
+private never leave the computer. Images and files come with Pro.
 
 </td>
 </tr>
@@ -92,8 +92,8 @@ costs nothing until you use it.
 | 3c | LAN discovery over mDNS: nearby computers appear by name, no IP addresses | ✅ Built and hand-tested |
 | 4 | **Windows** capture and injection (low-level hooks, Raw Input, `SendInput`) | 🧪 Built; real-PC test pending |
 | 5 | Desktop app in pure Rust (iced): Desk map, pairing, menu-bar / tray icon, light and dark | ✅ Built and hand-tested on a Mac |
-| 6 | Linux (X11, then Wayland through libei) | 🔜 |
-| 7 | Per-user installers, **signed self-updates without admin rights** (built for managed corporate laptops), device keys in Keychain / DPAPI, Overdesk Pro license keys | 🧪 Built; install-and-update test pending. Developer ID / Authenticode signing 🔜 |
+| 6 | **Linux**: X11 (XInput2 capture, XTest injection), then Wayland through the desktop portals (libei) | ⏳ In progress: builds on Linux; X11 adapter underway |
+| 7 | Per-user installers, **signed self-updates without admin rights** (built for managed corporate laptops) with automatic rollback of an update that fails to start (macOS), device keys in Keychain / DPAPI, Overdesk Pro license keys | 🧪 Built; install-and-update test pending. Developer ID / Authenticode signing 🔜 |
 | 8 | Android TV client (Pro) | 🔭 Stretch |
 
 ## Architecture
@@ -135,7 +135,8 @@ cargo run --release -p overdesk-app
 ```
 
 Pair once. After that, the two computers find each other and reconnect on their own: after
-a restart, sleep, or a dropped Wi-Fi. Press **Disconnect** and they stay apart until you
+a restart, sleep, or a dropped Wi-Fi. Repeated wrong pairing attempts from other computers
+are slowed down (10 s, then 30 s, then 60 s). Press **Disconnect** and they stay apart until you
 connect again. Installed copies open at login (per user, no admin rights); switch it off on
 the pairing screen or in the tray menu.
 
