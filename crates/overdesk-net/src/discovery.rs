@@ -89,6 +89,24 @@ fn os_from_str(s: &str) -> Option<Os> {
     })
 }
 
+/// Unicode characters that change how text displays without being visible: format
+/// characters such as bidirectional overrides and zero-width joiners, the byte-order
+/// mark, and line or paragraph separators. A device name carrying them could display as
+/// a different name in the Nearby list, so they are removed.
+fn is_invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'                    // soft hyphen
+            | '\u{061C}'              // Arabic letter mark
+            | '\u{180E}'              // Mongolian vowel separator
+            | '\u{200B}'..='\u{200F}' // zero-width space/joiners, LRM, RLM
+            | '\u{2028}'..='\u{202E}' // line/paragraph separators, bidi embeddings and overrides
+            | '\u{2060}'..='\u{206F}' // word joiner, invisible operators, bidi isolates
+            | '\u{FEFF}'              // byte-order mark / zero-width no-break space
+            | '\u{FFF9}'..='\u{FFFB}' // interlinear annotation controls
+    )
+}
+
 /// Validates one announcement. `txt` holds the TXT key/value pairs, `addrs` the resolved
 /// addresses and `port` the service port.
 ///
@@ -105,7 +123,7 @@ fn parse(txt: &[(&str, &str)], addrs: &[IpAddr], port: u16) -> Option<Nearby> {
     }
     let name: String = get("name")?
         .chars()
-        .filter(|c| !c.is_control())
+        .filter(|c| !c.is_control() && !is_invisible(*c))
         .take(MAX_NAME_CHARS)
         .collect();
     if name.is_empty() {
@@ -270,6 +288,17 @@ mod tests {
         );
         assert!(parse(&txt(HEX, "", "linux", "1"), &[V4], 1).is_none());
         assert!(parse(&txt(HEX, "\n\t", "linux", "1"), &[V4], 1).is_none());
+    }
+
+    #[test]
+    fn invisible_and_direction_changing_characters_are_stripped() {
+        // "Work PC" with a right-to-left override, zero-width space and BOM hidden inside.
+        let sneaky = "Work\u{202E}\u{200B} PC\u{FEFF}\u{2028}";
+        assert_eq!(
+            parse(&txt(HEX, sneaky, "linux", "1"), &[V4], 1).unwrap().name,
+            "Work PC"
+        );
+        assert!(parse(&txt(HEX, "\u{200D}\u{2066}", "linux", "1"), &[V4], 1).is_none());
     }
 
     #[test]
