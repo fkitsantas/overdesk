@@ -1,0 +1,21 @@
+{
+  "productName": "Overdesk",
+  "identifier": "org.overdesk.Overdesk",
+  "category": "Utility",
+  "outDir": "../../target/packages",
+  "binariesDir": "../../target/release",
+  "binaries": [{ "path": "overdesk", "main": true }],
+  "icons": [
+    "../../assets/brand/icons/app-icon-32.png",
+    "../../assets/brand/icons/app-icon-128.png",
+    "../../assets/brand/icons/app-icon-256.png",
+    "../../assets/brand/icons/app-icon-512.png",
+    "../../assets/brand/icons/app-icon-512@2x.png"
+  ],
+  "macos": {
+    "minimumSystemVersion": "13.0",
+    "infoPlistPath": "macos/Info.plist",
+    "signingIdentity": "-"
+  },
+  "nsis": { "installMode": "currentUser" }
+}
