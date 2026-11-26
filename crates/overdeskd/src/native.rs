@@ -105,7 +105,11 @@ impl Platform for NativePlatform {
     // A fresh handle per call: arboard's macOS handle is just NSPasteboard and its Windows
     // handle opens the clipboard only for the call, so nothing is cached or tied to the
     // main thread, and a clipboard another app is holding fails one call, not the session.
+    // A copy a password manager marked private is never read, so it is never sent.
     fn clipboard_text(&self) -> Option<String> {
+        if overdesk_platform::clipboard_is_private() {
+            return None;
+        }
         arboard::Clipboard::new().ok()?.get_text().ok()
     }
 

@@ -601,3 +601,23 @@ impl Injector {
         }
     }
 }
+
+/// True when the clipboard carries a marker that password managers set on secrets so
+/// clipboard tools skip them. shortcut: presence of any of these formats counts as private
+/// without reading their DWORD (0 = excluded, 1 = allowed); a manager that sets the value
+/// to 1 is treated as private too, which errs on the side of not sharing.
+pub fn clipboard_is_private() -> bool {
+    use windows_sys::Win32::System::DataExchange::{IsClipboardFormatAvailable, RegisterClipboardFormatW};
+    const MARKERS: [&str; 3] = [
+        "ExcludeClipboardContentFromMonitorProcessing",
+        "CanIncludeInClipboardHistory",
+        "CanUploadToCloudClipboard",
+    ];
+    MARKERS.iter().any(|name| {
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: `wide` is NUL-terminated and outlives the call; neither function needs
+        // the clipboard to be open.
+        let format = unsafe { RegisterClipboardFormatW(wide.as_ptr()) };
+        format != 0 && unsafe { IsClipboardFormatAvailable(format) } != 0
+    })
+}

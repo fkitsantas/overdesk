@@ -8,3 +8,14 @@
 pub mod input;
 pub mod mac;
 pub mod win;
+
+/// True when the current clipboard is marked private by the app that set it (password
+/// managers do this for copied secrets), so it must not be shared. `false` on other OSes.
+pub fn clipboard_is_private() -> bool {
+    #[cfg(target_os = "macos")]
+    return mac::ffi::clipboard_is_private();
+    #[cfg(windows)]
+    return win::ffi::clipboard_is_private();
+    #[cfg(not(any(target_os = "macos", windows)))]
+    false
+}
