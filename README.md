@@ -86,7 +86,7 @@ costs nothing until you use it.
 |---|---|---|
 | 0 | Workspace, CI on macOS / Windows / Linux, license checks, CLA | ✅ Done |
 | 1 | Two-lane wire protocol and core logic: screen layout, edge switching, held keys, ⌘↔Ctrl remap | ✅ Done |
-| 2 | **macOS** capture and injection with native Magic Mouse / trackpad / keyboard feel | 🚧 Built, awaiting hand test |
+| 2 | **macOS** capture and injection with native Magic Mouse / trackpad / keyboard feel | ✅ Built and hand-tested ([evidence](docs/tdd/macos-adapter.tdd.md)) |
 | 3 | Replicated Desk state, QUIC lanes, 6-digit pairing, LAN discovery, latency benchmark | ⏳ Next |
 | 4 | **Windows** capture and injection | 🔜 |
 | 5 | Desktop app: Tauri 2 + Svelte 5, drag-to-arrange screens, tray icon | 🔜 |
