@@ -23,15 +23,20 @@ use overdeskd::Side;
 use overdeskd::controller::{self, AppState, Command, Phase};
 use tokio::sync::{mpsc, watch};
 
+/// The port the controller listens on, and the one assumed when an address has none.
 const PORT: u16 = 24801;
+/// The Overdesk symbol, drawn beside the wordmark in the header.
 const SYMBOL: &[u8] = include_bytes!("../../../assets/brand/symbol.svg");
 // Inter (SIL OFL 1.1, assets/fonts/Inter-LICENSE.txt): the grotesk of the wordmark,
 // identical on macOS and Windows, with a real semibold.
+/// The app's typeface, bundled so every platform renders the same.
 const INTER: Font = Font::with_name("Inter");
 
 /// The controller's live state, read by the subscription (which takes no captures).
 static STATE: OnceLock<watch::Receiver<AppState>> = OnceLock::new();
 
+/// Opens the window: Inter as the default font, the brand theme, and the controller's
+/// state as a subscription.
 fn main() -> iced::Result {
     iced::application(App::boot, App::update, App::view)
         .title("Overdesk")
@@ -44,51 +49,83 @@ fn main() -> iced::Result {
         .run()
 }
 
+/// A macOS privacy permission that Overdesk needs before it can start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Permission {
+    /// Lets Overdesk capture the keyboard and mouse.
     InputMonitoring,
+    /// Lets Overdesk inject input on this Mac.
     Accessibility,
 }
 
+/// Which top-level screen the window shows.
 enum Screen {
     /// macOS needs Input Monitoring and Accessibility before anything else.
     Permissions {
+        /// Whether Input Monitoring is granted.
         input_monitoring: bool,
+        /// Whether Accessibility is granted.
         accessibility: bool,
     },
+    /// The controller is starting.
     Starting,
+    /// The controller could not start; the message says why.
     Failed(String),
+    /// The controller is running; the UI renders its state.
     Running {
+        /// Where UI commands go.
         commands: mpsc::UnboundedSender<Command>,
+        /// The latest state the controller published.
         state: AppState,
     },
 }
 
+/// The iced application. It renders controller state, plus the little the form and
+/// the animation need, and holds no connection state of its own.
 struct App {
+    /// The top-level screen being shown.
     screen: Screen,
+    /// Light or dark, following the system.
     theme: ThemeMode,
+    /// What the user has typed into the address field.
     address: String,
+    /// The Left / Right choice for the other device's screen.
     side: Side,
+    /// The ribbon animation's position, 0.0..1.0.
     phase: f32,
 }
 
+/// Everything that can change the app: controller events, system events and user input.
 #[derive(Debug, Clone)]
 enum Message {
+    /// The controller started, or failed to.
     Started(Result<(mpsc::UnboundedSender<Command>, AppState), String>),
+    /// The controller published a new state.
     State(AppState),
+    /// The system switched between light and dark.
     Theme(ThemeMode),
+    /// An animation frame while the cursor is on another device.
     Frame,
+    /// The address field changed.
     Address(String),
+    /// The user picked which side the other device is on.
     Side(Side),
+    /// The user asked to connect to the typed address.
     Connect,
+    /// Forward a command to the controller as is.
     Send(Command),
+    /// Open System Settings at the pane for a permission.
     OpenSettings(Permission),
+    /// Restart the app so newly granted permissions take effect.
     Relaunch,
+    /// The preview screenshot is ready to save.
     #[cfg(feature = "preview")]
     Shot(iced::window::Screenshot),
 }
 
 impl App {
+    /// Builds the first screen: the permissions check on macOS, otherwise starting the
+    /// controller. With `OVERDESK_PREVIEW` set, renders a fixed preview state instead.
     fn boot() -> (Self, Task<Message>) {
         #[cfg(feature = "preview")]
         if let Ok(which) = std::env::var("OVERDESK_PREVIEW") {
@@ -140,6 +177,7 @@ impl App {
         )
     }
 
+    /// Applies a message. Connection changes happen only by sending controller commands.
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Started(Ok((commands, state))) => self.screen = Screen::Running { commands, state },
@@ -170,19 +208,24 @@ impl App {
         Task::none()
     }
 
+    /// Sends a command to the controller, if it is running.
     fn send(&self, c: Command) {
         if let Screen::Running { commands, .. } = &self.screen {
             let _ = commands.send(c);
         }
     }
 
+    /// Follows the system theme and the controller's state, plus animation frames while
+    /// the cursor is on another device.
     fn subscription(&self) -> Subscription<Message> {
+        // A preview renders one frozen state; live updates would overwrite it.
         if cfg!(feature = "preview") && std::env::var_os("OVERDESK_PREVIEW").is_some() {
             return Subscription::none();
         }
         let mut subs = vec![iced::system::theme_changes().map(Message::Theme)];
         if let Screen::Running { state, .. } = &self.screen {
             subs.push(Subscription::run(watch_state));
+            // Animate the ribbon only while the cursor is on another device.
             if matches!(
                 state.phase,
                 Phase::Connected {
@@ -196,10 +239,12 @@ impl App {
         Subscription::batch(subs)
     }
 
+    /// The brand theme for the current light or dark mode.
     fn theme(&self) -> Option<Theme> {
         Some(style::theme(self.theme))
     }
 
+    /// The header above whichever screen is current.
     fn view(&self) -> Element<'_, Message> {
         let header = row![
             svg(svg::Handle::from_memory(SYMBOL)).width(34).height(16),
@@ -229,6 +274,7 @@ impl App {
             .into()
     }
 
+    /// The screen for each controller phase.
     fn running_view<'a>(&'a self, state: &'a AppState) -> Element<'a, Message> {
         let here = device_word(state.os);
         match &state.phase {
@@ -339,6 +385,8 @@ impl App {
         }
     }
 
+    /// The pairing form: the other device's address, which side it is on, and this
+    /// device's own address and pairing control.
     fn idle_view<'a>(&'a self, state: &'a AppState) -> Element<'a, Message> {
         let here = device_word(state.os);
         let side = |s: Side, label: &'static str| {
@@ -355,6 +403,7 @@ impl App {
             connect
         };
 
+        // The controller binds 0.0.0.0; show the LAN address another device can actually dial.
         let my_address = state
             .address
             .map(|a| SocketAddr::new(lan_ip().unwrap_or(a.ip()), a.port()).to_string())
@@ -405,10 +454,12 @@ impl App {
     }
 }
 
+/// A screen title: large and semibold.
 fn title<'a>(s: String) -> iced::widget::Text<'a> {
     text(s).size(22).font(bold())
 }
 
+/// Inter Semibold, for titles and emphasis.
 fn bold() -> Font {
     Font {
         weight: font::Weight::Semibold,
@@ -416,12 +467,14 @@ fn bold() -> Font {
     }
 }
 
+/// Secondary text in the theme's muted ink.
 fn muted(theme: &Theme) -> text::Style {
     text::Style {
         color: Some(style::muted(theme)),
     }
 }
 
+/// The macOS permissions screen: one row per permission, then a button to reopen.
 fn permissions_view<'a>(input_monitoring: bool, accessibility: bool) -> Element<'a, Message> {
     let item = |granted: bool, name: &'a str, why: &'a str, which: Permission| {
         let state: Element<'a, Message> = if granted {
@@ -478,10 +531,12 @@ fn permissions_view<'a>(input_monitoring: bool, accessibility: bool) -> Element<
     .into()
 }
 
+/// Streams each new controller state to the app as [`Message::State`].
 fn watch_state() -> impl iced::futures::Stream<Item = Message> {
     iced::stream::channel(16, async |mut out: iced::futures::channel::mpsc::Sender<Message>| {
         let Some(rx) = STATE.get() else { return };
         let mut rx = rx.clone();
+        // `changed` fails once the controller drops its sender; the stream then ends.
         while rx.changed().await.is_ok() {
             let now = rx.borrow_and_update().clone();
             if out.send(Message::State(now)).await.is_err() {
@@ -491,6 +546,8 @@ fn watch_state() -> impl iced::futures::Stream<Item = Message> {
     })
 }
 
+/// Starts the native platform and the controller, and hands back its command sender
+/// and first state.
 async fn start() -> Result<(mpsc::UnboundedSender<Command>, AppState), String> {
     let platform = overdeskd::native::NativePlatform::start()?;
     let (width, height) = overdeskd::native::main_display_size();
@@ -506,10 +563,12 @@ async fn start() -> Result<(mpsc::UnboundedSender<Command>, AppState), String> {
     };
     let (commands, state) = controller::spawn(config, platform).await.map_err(|e| e.to_string())?;
     let now = state.borrow().clone();
+    // The subscription reads the state from here; it is set once per launch.
     let _ = STATE.set(state);
     Ok((commands, now))
 }
 
+/// Parses `ip:port`, or a bare IP on the default port.
 fn parse_address(s: &str) -> Option<SocketAddr> {
     let s = s.trim();
     s.parse::<SocketAddr>()
@@ -524,10 +583,12 @@ fn lan_ip() -> Option<IpAddr> {
     socket.local_addr().ok().map(|a| a.ip())
 }
 
+/// The operating system this build runs on.
 fn this_os() -> Os {
     if cfg!(windows) { Os::Windows } else { Os::MacOs }
 }
 
+/// What people call this device in sentences: "Mac" or "PC".
 fn device_word(os: Os) -> &'static str {
     match os {
         Os::MacOs => "Mac",
@@ -535,6 +596,7 @@ fn device_word(os: Os) -> &'static str {
     }
 }
 
+/// A peer's operating system, named for people.
 fn os_word(os: Os) -> &'static str {
     match os {
         Os::MacOs => "Mac",
@@ -544,6 +606,7 @@ fn os_word(os: Os) -> &'static str {
     }
 }
 
+/// The key chord that always takes control back on the given operating system.
 fn escape_chord(os: Os) -> &'static str {
     if os == Os::MacOs {
         "Ctrl+Option+Cmd+Esc"
@@ -552,6 +615,7 @@ fn escape_chord(os: Os) -> &'static str {
     }
 }
 
+/// Where the identity and pinned peers live: `OVERDESK_HOME`, or the per-OS default.
 fn store_dir() -> std::path::PathBuf {
     if let Some(dir) = std::env::var_os("OVERDESK_HOME") {
         return dir.into();
@@ -570,6 +634,7 @@ fn store_dir() -> std::path::PathBuf {
     }
 }
 
+/// This device's name as people know it: the macOS computer name, or the Windows one.
 fn device_name() -> String {
     #[cfg(target_os = "macos")]
     if let Ok(out) = std::process::Command::new("scutil")
@@ -585,16 +650,19 @@ fn device_name() -> String {
     std::env::var("COMPUTERNAME").unwrap_or_else(|_| "This computer".into())
 }
 
+/// Whether Input Monitoring and Accessibility are granted.
 #[cfg(target_os = "macos")]
 fn permissions() -> (bool, bool) {
     overdeskd::native::permissions()
 }
 
+/// Other operating systems need no permissions, so both count as granted.
 #[cfg(not(target_os = "macos"))]
 fn permissions() -> (bool, bool) {
     (true, true)
 }
 
+/// Opens System Settings at the pane that grants `which`, on macOS.
 fn open_settings(which: Permission) {
     #[cfg(target_os = "macos")]
     {
@@ -609,6 +677,7 @@ fn open_settings(which: Permission) {
             ))
             .spawn();
     }
+    // Other platforms have no settings pane to open.
     let _ = which;
 }
 

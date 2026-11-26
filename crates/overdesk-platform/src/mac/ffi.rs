@@ -37,13 +37,17 @@ const INJECTED_TAG: i64 = 0x4F56_4552_4445_534B; // "OVERDESK"
 /// shortcut: fixed 500 ms; read the user's `NSEvent.doubleClickInterval` once AppKit is linked.
 const DOUBLE_CLICK_MS: u64 = 500;
 
+/// Why the macOS adapter could not start.
 #[derive(Debug, PartialEq, Eq)]
 pub enum MacError {
     /// Grant in System Settings › Privacy & Security › Input Monitoring.
     NoListenPermission,
     /// Grant in System Settings › Privacy & Security › Accessibility.
     NoPostPermission,
+    /// `CGEventTapCreate`, its run-loop source or the tap thread could not be set up,
+    /// usually because a permission was revoked after the preflight check.
     TapCreateFailed,
+    /// `CGEventSourceCreate` returned no event source for injection.
     SourceCreateFailed,
 }
 
@@ -72,12 +76,23 @@ pub fn request_permissions() {
 
 pub use crate::input::Captured;
 
+/// State for the event tap callback, passed to Quartz as the tap's `userInfo` pointer.
+/// Owned by the tap thread and only touched from its run loop, hence `Cell`/`RefCell`
+/// rather than locks.
 struct TapCtx {
+    /// Where captured input goes; the receiving end belongs to the engine.
     tx: Sender<Captured>,
+    /// Set while focus is on another peer, so local input is consumed. Shared with
+    /// [`Capture::set_swallow`].
     swallow: Arc<AtomicBool>,
+    /// The tap's Mach port, so the callback can re-enable a tap macOS disabled. Set
+    /// once, right after the tap is created.
     port: OnceCell<CFRetained<CFMachPort>>,
+    /// Keeps local apps' press/release pairs balanced across swallow changes.
     local: RefCell<LocalDowns>,
+    /// Carries fractional pointer motion between events.
     sub: RefCell<Subpixel>,
+    /// Failsafe detector for the escape chord.
     chord: RefCell<EscapeChord>,
     /// Whether this tap last hid the cursor.
     detached: Cell<bool>,
@@ -88,7 +103,10 @@ unsafe extern "C" {
     // (or stop it moving) through any public API; Deskflow, Barrier and Synergy rely on
     // this property for the same reason. If a macOS release breaks it, only the cursor's
     // visibility while on another device is affected.
+    /// Returns this process's connection id to the WindowServer.
     fn _CGSDefaultConnection() -> i32;
+    /// Sets a property on WindowServer connection `target` on behalf of `cid`;
+    /// returns a `CGError` (0 on success).
     fn CGSSetConnectionProperty(cid: i32, target: i32, key: &CFString, value: &CFType) -> i32;
 }
 
@@ -120,8 +138,11 @@ const FLAG_CAPS_LOCK: u64 = 0x0001_0000;
 
 /// A running event tap. Dropping it stops the tap thread.
 pub struct Capture {
+    /// Asks the tap thread to leave its run loop; set on drop.
     stop: Arc<AtomicBool>,
+    /// Shared with the tap callback; see [`Capture::set_swallow`].
     swallow: Arc<AtomicBool>,
+    /// The tap thread; `None` only after it has been joined.
     thread: Option<JoinHandle<()>>,
 }
 
@@ -144,6 +165,8 @@ impl Capture {
             .name("overdesk-mac-tap".into())
             .spawn(move || run_tap(tx, swallow_t, stop_t, ready_tx))
             .map_err(|_| MacError::TapCreateFailed)?;
+        // Wait for the thread to report: the outer `?` covers a thread that died before
+        // answering, the inner one a tap it could not create.
         ready_rx.recv().map_err(|_| MacError::TapCreateFailed)??;
         Ok((
             Self {
@@ -172,6 +195,9 @@ impl Drop for Capture {
     }
 }
 
+/// Body of the tap thread: creates an active `kCGHIDEventTap` tap at the head of the
+/// queue for every mouse, key, modifier and scroll event, attaches it to this thread's
+/// run loop, reports success or failure on `ready`, then runs the loop until `stop`.
 fn run_tap(tx: Sender<Captured>, swallow: Arc<AtomicBool>, stop: Arc<AtomicBool>, ready: Sender<Result<(), MacError>>) {
     let mask = [
         CGEventType::LeftMouseDown,
@@ -190,6 +216,7 @@ fn run_tap(tx: Sender<Captured>, swallow: Arc<AtomicBool>, stop: Arc<AtomicBool>
         CGEventType::OtherMouseDragged,
     ]
     .iter()
+    // CGEventMask: bit n set means "deliver events of type n" (CGEventMaskBit).
     .fold(0u64, |m, t| m | (1 << t.0));
 
     // Lives until this thread ends; only this thread's run loop touches it.
@@ -252,6 +279,13 @@ fn run_tap(tx: Sender<Captured>, swallow: Arc<AtomicBool>, stop: Arc<AtomicBool>
     drop(ctx);
 }
 
+/// The `CGEventTapCallBack` given to Quartz. Returns the event to let it through, or
+/// null to consume it.
+///
+/// # Safety
+///
+/// Called only by Quartz on the tap thread, with `info` being the `TapCtx` pointer
+/// passed to `CGEvent::tap_create` and `event` valid for the duration of the call.
 unsafe extern "C-unwind" fn tap_callback(
     _proxy: CGEventTapProxy,
     ty: CGEventType,
@@ -270,6 +304,9 @@ unsafe extern "C-unwind" fn tap_callback(
     .unwrap_or(raw)
 }
 
+/// Safe body of [`tap_callback`]: re-enables a disabled tap, skips our own injected
+/// events, forwards the rest, checks the escape chord and decides whether `raw` reaches
+/// local apps (returned as is) or is consumed (null).
 fn handle(ctx: &TapCtx, ty: CGEventType, ev: &CGEvent, raw: *mut CGEvent) -> *mut CGEvent {
     if ty == CGEventType::TapDisabledByTimeout || ty == CGEventType::TapDisabledByUserInput {
         // macOS disables slow taps; turn ourselves back on immediately.
@@ -303,6 +340,7 @@ fn handle(ctx: &TapCtx, ty: CGEventType, ev: &CGEvent, raw: *mut CGEvent) -> *mu
     if deliver { raw } else { null_mut() }
 }
 
+/// Reads integer field `f` of `ev` (`CGEventGetIntegerValueField`).
 fn field(ev: &CGEvent, f: CGEventField) -> i64 {
     CGEvent::integer_value_field(Some(ev), f)
 }
@@ -318,6 +356,8 @@ fn button_number(b: Button) -> i64 {
     }
 }
 
+/// Maps the `kCGMouseEventButtonNumber` of an "other" mouse event to a button.
+/// Buttons above 4 have no Overdesk equivalent and are ignored.
 fn other_button(n: i64) -> Option<Button> {
     match n {
         2 => Some(Button::Middle),
@@ -424,21 +464,34 @@ fn translate(ty: CGEventType, ev: &CGEvent, ctx: &TapCtx) -> Option<(Held, bool)
 
 /// Posts input that apps cannot tell apart from real Apple hardware.
 pub struct Injector {
+    /// `kCGEventSourceStateHIDSystemState` source, so posted events update the same
+    /// global key and button state as real hardware.
     source: CFRetained<CGEventSource>,
+    /// Overdesk codes this injector holds down, in press order; they decide the
+    /// modifier flags of every posted event.
     keys: Vec<u32>,
+    /// Buttons this injector holds down; they make moves into drags.
     buttons: Vec<Button>,
+    /// Computes the multi-click count of each press.
     clicks: ClickCounter,
+    /// Click count of the latest press, also stamped on its release as macOS expects.
     last_click_count: i64,
+    /// Last position this injector moved the pointer to (global points); presses and
+    /// releases are posted here.
     pos: CGPoint,
+    /// Time origin for the click counter's millisecond timestamps.
     epoch: Instant,
 }
 
 impl Injector {
+    /// Creates an injector, starting from wherever the cursor is now. Fails without
+    /// Accessibility permission, since posted events would be silently dropped.
     pub fn new() -> Result<Self, MacError> {
         if !permissions().1 {
             return Err(MacError::NoPostPermission);
         }
         let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState).ok_or(MacError::SourceCreateFailed)?;
+        // A fresh null event carries the current cursor location.
         let pos = CGEvent::new(None)
             .map(|e| CGEvent::location(Some(&e)))
             .unwrap_or(CGPoint { x: 0.0, y: 0.0 });
@@ -453,6 +506,8 @@ impl Injector {
         })
     }
 
+    /// Tags `ev` as ours, gives it the flags of the held modifiers (keeping the system's
+    /// Caps Lock state) and posts it at the HID level, where real hardware events enter.
     fn post(&self, ev: &CGEvent) {
         CGEvent::set_integer_value_field(Some(ev), CGEventField::EventSourceUserData, INJECTED_TAG);
         let caps = CGEvent::flags(Some(ev)).0 & FLAG_CAPS_LOCK;
@@ -504,6 +559,8 @@ impl Injector {
         }
     }
 
+    /// Presses or releases `button` at the injector's pointer position, with the
+    /// click count and button number real hardware would report.
     pub fn button(&mut self, button: Button, pressed: bool) {
         let (ty, cg_button, number) = match (button, pressed) {
             (Button::Left, true) => (CGEventType::LeftMouseDown, CGMouseButton::Left, 0),
@@ -561,12 +618,16 @@ impl Injector {
         }
     }
 
+    /// Posts one scroll event with its gesture/momentum phase, so trackpad scrolling
+    /// with inertia and rubber-banding looks native. Pixel deltas are marked continuous
+    /// like trackpad input; notch deltas become line scrolls like a wheel mouse.
     pub fn scroll(&mut self, dx: i32, dy: i32, unit: ScrollUnit, phase: Phase) {
         let (cg_unit, dx, dy) = match unit {
             ScrollUnit::Pixel => (CGScrollEventUnit::Pixel, dx, dy),
             // shortcut: drops sub-notch remainders from high-resolution wheels; accumulate them if users notice.
             ScrollUnit::Notch120 => (CGScrollEventUnit::Line, dx / 120, dy / 120),
         };
+        // Two axes: axis 1 vertical, axis 2 horizontal with Quartz's positive-left sign.
         let Some(ev) = CGEvent::new_scroll_wheel_event2(Some(&self.source), cg_unit, 2, dy, -dx, 0) else {
             return;
         };

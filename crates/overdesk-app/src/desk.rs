@@ -10,14 +10,19 @@ use overdeskd::controller::ScreenView;
 
 use crate::style::{INDIGO, TEAL, VIOLET, alpha, hairline, ink, muted};
 
+/// The Desk map widget: draws the shared Desk's screens, scaled to fit, on a canvas.
 pub struct DeskMap<'a> {
+    /// The screens to draw, in Desk coordinates.
     pub screens: &'a [ScreenView],
+    /// Where the cursor is, which decides the teal screen and the ribbon's flow.
     pub mode: Mode,
     /// 0.0..1.0, advanced by animation frames while the cursor is away.
     pub phase: f32,
 }
 
+/// The space between neighbouring screens, in pixels.
 const GAP: f32 = 16.0;
+/// The margin around the drawn Desk, in pixels.
 const PAD: f32 = 12.0;
 
 impl<Message> Program<Message> for DeskMap<'_> {
@@ -33,12 +38,14 @@ impl<Message> Program<Message> for DeskMap<'_> {
         let max_x = self.screens.iter().map(|s| s.x as f32 + s.w as f32).fold(0.0, f32::max);
         let max_y = self.screens.iter().map(|s| s.y as f32 + s.h as f32).fold(0.0, f32::max);
         let gaps = (self.screens.len() - 1) as f32 * GAP;
+        // Fit the whole Desk inside the padded bounds, keeping the screens' proportions.
         let scale =
             ((bounds.width - 2.0 * PAD - gaps) / (max_x - min_x)).min((bounds.height - 2.0 * PAD) / (max_y - min_y));
         let drawn_w = (max_x - min_x) * scale + gaps;
         let ox = (bounds.width - drawn_w) / 2.0;
         let oy = (bounds.height - (max_y - min_y) * scale) / 2.0;
 
+        // Lay the screens out left to right, so a fixed gap can separate neighbours.
         let mut ordered: Vec<&ScreenView> = self.screens.iter().collect();
         ordered.sort_by_key(|s| s.x);
         let rects: Vec<(Rectangle, &ScreenView)> = ordered
@@ -56,6 +63,7 @@ impl<Message> Program<Message> for DeskMap<'_> {
             })
             .collect();
 
+        // The cursor is on this device unless this device is driving the peer.
         let active_is_me = !matches!(self.mode, Mode::Driving(_));
         for (r, s) in &rects {
             let on = s.me == active_is_me;
@@ -128,6 +136,7 @@ impl<Message> Program<Message> for DeskMap<'_> {
                         line_cap: canvas::LineCap::Round,
                         line_dash: canvas::LineDash {
                             segments: &[6.0, 14.0],
+                            // Shifting the dash offset each frame makes the light travel; the sign sets its direction.
                             offset: (-dir * self.phase * 20.0).rem_euclid(20.0) as usize,
                         },
                         ..Stroke::default()

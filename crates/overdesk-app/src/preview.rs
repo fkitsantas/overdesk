@@ -12,6 +12,8 @@ use overdeskd::controller::{AppState, Phase, ScreenView};
 
 use crate::Message;
 
+/// The fixed state named by `which`, and the permission flags to show (if the
+/// permissions screen is wanted instead).
 pub fn state(which: &str) -> (AppState, Option<(bool, bool)>) {
     let desk = vec![
         ScreenView {
@@ -59,6 +61,7 @@ pub fn state(which: &str) -> (AppState, Option<(bool, bool)>) {
     (state, perms)
 }
 
+/// Light, or dark when `OVERDESK_PREVIEW_THEME=dark`.
 pub fn theme() -> ThemeMode {
     if std::env::var("OVERDESK_PREVIEW_THEME").as_deref() == Ok("dark") {
         ThemeMode::Dark
@@ -69,6 +72,7 @@ pub fn theme() -> ThemeMode {
 
 /// Waits for the first frames, screenshots the window, writes a PNG, exits.
 pub fn shoot() -> Task<Message> {
+    // Give the window time to lay out and paint before capturing it.
     Task::future(tokio::time::sleep(Duration::from_millis(900)))
         .then(|_| iced::window::latest())
         .then(|id| match id {
@@ -77,6 +81,7 @@ pub fn shoot() -> Task<Message> {
         })
 }
 
+/// Writes the screenshot as a PNG to `OVERDESK_SHOT` and exits.
 pub fn save(shot: iced::window::Screenshot) -> ! {
     let path = std::env::var("OVERDESK_SHOT").unwrap_or_else(|_| "overdesk-preview.png".into());
     let file = std::fs::File::create(&path).expect("create screenshot");

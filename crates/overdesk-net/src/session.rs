@@ -8,20 +8,37 @@ use ring::rand::{SecureRandom, SystemRandom};
 use crate::pairing::{Dialer, Fingerprint, Listener, Nonce, PairError, Step, peer_id};
 use crate::transport::{Link, NetError, Role};
 
+/// Errors from the session handshakes run on a fresh link: pairing and `Hello`.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
+    /// The transport failed: the link closed, a frame was rejected, or the link is not
+    /// trusted.
     #[error(transparent)]
     Net(#[from] NetError),
+    /// The peer broke the pairing protocol: a message out of order, or a reveal that
+    /// does not match its commitment. Treat it as a possible attack.
     #[error("pairing protocol: {0:?}")]
     Pairing(PairError),
+    /// The exchange completed but at least one user rejected the code. Nothing is
+    /// pinned.
     #[error("pairing declined")]
     Declined,
+    /// The peer's `Hello` names a protocol version other than ours.
     #[error("peer speaks protocol {theirs}, we speak {ours}")]
-    VersionMismatch { ours: u16, theirs: u16 },
+    VersionMismatch {
+        /// The version this build speaks.
+        ours: u16,
+        /// The version the peer announced.
+        theirs: u16,
+    },
+    /// The peer id in the peer's `Hello` is not derived from the certificate it
+    /// authenticated with, so it is trying to pass as another device.
     #[error("peer's Hello claims an id that does not match its certificate")]
     IdentityMismatch,
+    /// The first control message from the peer was not `Hello`.
     #[error("expected Hello")]
     NoHello,
+    /// Pairing did not finish within its time limit.
     #[error("pairing timed out")]
     TimedOut,
 }
@@ -36,6 +53,12 @@ impl From<PairError> for SessionError {
     }
 }
 
+/// 32 bytes from the operating system's CSPRNG, for one pairing attempt.
+///
+/// # Errors
+///
+/// Returns [`NetError::Io`] if the system RNG cannot be read; pairing never falls back
+/// to a weaker source.
 fn fresh_nonce() -> Result<Nonce, SessionError> {
     let mut n = [0u8; 32];
     SystemRandom::new()
@@ -48,11 +71,25 @@ fn fresh_nonce() -> Result<Nonce, SessionError> {
 /// Returns the peer fingerprint to pin, only if both users confirmed. Protocol
 /// failures close the link. A clean decline leaves it open, because closing at once could
 /// discard our `Reject` before the peer reads it; the caller drops the link.
+///
+/// The link is not trusted by this call: the caller pins the returned fingerprint and
+/// then calls [`Link::trust`].
+///
+/// # Errors
+///
+/// Returns [`SessionError::Declined`] if either user rejects the code,
+/// [`SessionError::Pairing`] if the peer breaks the protocol,
+/// [`SessionError::TimedOut`] after [`PAIRING_TIMEOUT`], and [`SessionError::Net`] if
+/// the link fails.
 pub async fn pair(link: &mut Link, confirm: impl AsyncFnOnce(u32) -> bool) -> Result<Fingerprint, SessionError> {
     pair_with_timeout(link, confirm, PAIRING_TIMEOUT).await
 }
 
 /// [`pair`] with an explicit time limit.
+///
+/// # Errors
+///
+/// As for [`pair`], with [`SessionError::TimedOut`] after `limit`.
 pub async fn pair_with_timeout(
     link: &mut Link,
     confirm: impl AsyncFnOnce(u32) -> bool,
@@ -61,12 +98,20 @@ pub async fn pair_with_timeout(
     let result = tokio::time::timeout(limit, pair_inner(link, confirm))
         .await
         .unwrap_or(Err(SessionError::TimedOut));
+    // Close on every failure except a decline, whose `Reject` must still reach the peer.
     if matches!(result, Err(ref e) if !matches!(e, SessionError::Declined)) {
         link.close("pairing failed");
     }
     result
 }
 
+/// The pairing exchange itself, without the time limit or close-on-failure handling.
+/// Both sides always send their own verdict and wait for the peer's, so neither pins
+/// unless both users confirmed.
+///
+/// # Errors
+///
+/// As for [`pair`], except [`SessionError::TimedOut`].
 async fn pair_inner(link: &mut Link, confirm: impl AsyncFnOnce(u32) -> bool) -> Result<Fingerprint, SessionError> {
     let (my_fp, peer_fp) = (link.local_fingerprint(), link.peer_fingerprint());
     let nonce = fresh_nonce()?;
@@ -83,6 +128,7 @@ async fn pair_inner(link: &mut Link, confirm: impl AsyncFnOnce(u32) -> bool) -> 
             }
         }
         Role::Listener => {
+            // The fingerprints are passed in role order, so both sides hash the same input.
             let mut l = Listener::new(nonce, peer_fp, my_fp);
             let Step::Send(reply) = l.on_message(&link.recv_pairing().await?)? else {
                 return Err(PairError::Unexpected.into());
@@ -108,13 +154,28 @@ async fn pair_inner(link: &mut Link, confirm: impl AsyncFnOnce(u32) -> bool) -> 
 /// What we announce in `Hello`.
 #[derive(Debug, Clone)]
 pub struct Me {
+    /// Human-readable device name shown to the peer's user.
     pub name: String,
+    /// Operating system of this device, so the peer can map keys and shortcuts.
     pub os: Os,
+    /// Width of this device's screen in pixels.
     pub width: u32,
+    /// Height of this device's screen in pixels.
     pub height: u32,
 }
 
 /// Exchanges `Hello` with a trusted peer. Returns the peer's `Hello`.
+///
+/// The peer id we announce is derived from our certificate, and the peer's is checked
+/// against the certificate it authenticated with, so a pinned device cannot claim to be
+/// another one.
+///
+/// # Errors
+///
+/// Returns [`SessionError::Net`] if the link is untrusted or fails,
+/// [`SessionError::NoHello`] if the peer's first message is not `Hello`,
+/// [`SessionError::VersionMismatch`] for another protocol version, and
+/// [`SessionError::IdentityMismatch`] for a forged peer id.
 pub async fn hello(link: &mut Link, me: &Me) -> Result<Control, SessionError> {
     link.send_control(&Control::Hello {
         version: PROTOCOL_VERSION,

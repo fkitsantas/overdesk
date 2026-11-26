@@ -6,16 +6,23 @@ use iced::theme::{Mode, Palette};
 use iced::widget::{button, container, text_input};
 use iced::{Background, Border, Color, Shadow, Theme};
 
+/// Electric Indigo, from the palette board: buttons, focus and selection.
 pub const INDIGO: Color = Color::from_rgb8(0x6A, 0x5C, 0xFF); // Electric Indigo: actions, focus
+/// Violet Blue, from the palette board: the start of the brand ribbon.
 pub const VIOLET: Color = Color::from_rgb8(0x7A, 0x3F, 0xF2); // Violet Blue: the brand ribbon
+/// Teal, from the palette board: the screen that has the cursor, and "connected".
 pub const TEAL: Color = Color::from_rgb8(0x14, 0xB8, 0xA6); // Teal: live, "the cursor is here"
+/// Near-Black, from the palette board: text in light mode, the background in dark.
 pub const INK: Color = Color::from_rgb8(0x0B, 0x0B, 0x10); // Near-Black
+/// Near-White, from the palette board: the background in light mode, text in dark.
 pub const PAPER: Color = Color::from_rgb8(0xF8, 0xF9, 0xFB); // Near-White
 
+/// `c` at opacity `a`: how every shade beyond the five brand colours is made.
 pub fn alpha(c: Color, a: f32) -> Color {
     Color { a, ..c }
 }
 
+/// The iced theme for light or dark mode, built from the brand palette alone.
 pub fn theme(mode: Mode) -> Theme {
     let dark = mode == Mode::Dark;
     Theme::custom(
@@ -25,6 +32,7 @@ pub fn theme(mode: Mode) -> Theme {
             text: if dark { PAPER } else { INK },
             primary: INDIGO,
             success: TEAL,
+            // The palette has no amber or red, so warnings and errors use Violet Blue.
             warning: VIOLET,
             danger: VIOLET,
         },
@@ -36,14 +44,17 @@ pub fn ink(theme: &Theme) -> Color {
     theme.palette().text
 }
 
+/// Secondary text: the theme's ink at reduced opacity.
 pub fn muted(theme: &Theme) -> Color {
     alpha(ink(theme), 0.58)
 }
 
+/// Dividers and resting borders: the theme's ink, barely there.
 pub fn hairline(theme: &Theme) -> Color {
     alpha(ink(theme), 0.1)
 }
 
+/// A border with only rounded corners, for filled shapes.
 fn radius(r: f32) -> Border {
     Border {
         radius: r.into(),
@@ -51,6 +62,7 @@ fn radius(r: f32) -> Border {
     }
 }
 
+/// The filled Indigo button for the main action on a screen.
 pub fn primary(_theme: &Theme, status: button::Status) -> button::Style {
     let bg = match status {
         button::Status::Hovered | button::Status::Pressed => alpha(INDIGO, 0.88),
@@ -66,6 +78,7 @@ pub fn primary(_theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// The outlined button for every other action.
 pub fn secondary(theme: &Theme, status: button::Status) -> button::Style {
     let fill = match status {
         button::Status::Hovered | button::Status::Pressed => 0.08,
@@ -97,6 +110,7 @@ pub fn segment(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Sty
     }
 }
 
+/// The text input: a faint fill, and an Indigo border while focused.
 pub fn field(theme: &Theme, status: text_input::Status) -> text_input::Style {
     let focused = matches!(status, text_input::Status::Focused { .. });
     text_input::Style {

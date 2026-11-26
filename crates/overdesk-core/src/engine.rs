@@ -21,97 +21,156 @@ pub const TAKEOVER_HOLD_MS: u64 = 300;
 /// Local motion smaller than this (|dx| + |dy|) while driven is jitter, not a takeover.
 pub const TAKEOVER_MIN_MOVE: i32 = 3;
 
+/// Input the daemon feeds into [`Engine::handle`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     /// Local motion; `x`, `y` are where the OS cursor is, local to this device's screen.
     LocalMove {
+        /// Relative horizontal motion in logical pixels, not limited by the screen edge.
         dx: i32,
+        /// Relative vertical motion in logical pixels, not limited by the screen edge.
         dy: i32,
+        /// OS cursor x after the move, local to this device's screen.
         x: i32,
+        /// OS cursor y after the move, local to this device's screen.
         y: i32,
     },
+    /// A button on this device's own pointing hardware changed state.
     LocalButton {
+        /// Button that changed state.
         button: Button,
+        /// `true` for press, `false` for release.
         pressed: bool,
     },
+    /// A key on this device's own keyboard changed state.
     LocalKey {
+        /// Usage page selector ORed with the HID usage id; see [`overdesk_proto::PAGE_KEYBOARD`].
         code: u32,
+        /// `true` for key-down, `false` for key-up.
         pressed: bool,
     },
+    /// Scroll input from this device's own hardware.
     LocalScroll {
+        /// Horizontal delta in `unit`s.
         dx: i32,
+        /// Vertical delta in `unit`s.
         dy: i32,
+        /// Unit of `dx` and `dy`.
         unit: ScrollUnit,
+        /// Position of this event within a continuous scroll.
         phase: Phase,
     },
     /// The failsafe chord: input is already back locally; tidy up the rest.
     Escape,
+    /// A control-lane message from an authenticated peer.
     Peer {
+        /// Authenticated sender.
         from: PeerId,
+        /// The decoded message.
         msg: Control,
     },
+    /// A motion-lane datagram from an authenticated peer.
     PeerMotion {
+        /// Authenticated sender.
         from: PeerId,
+        /// The decoded datagram.
         motion: Motion,
     },
+    /// The connection to this peer closed or timed out.
     PeerLost(PeerId),
 }
 
+/// Side effect the daemon must perform, in order, after [`Engine::handle`] returns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
+    /// Send a message to `to` on the control lane.
     Send {
+        /// Recipient peer.
         to: PeerId,
+        /// Message to send.
         msg: Control,
     },
+    /// Send a datagram to `to` on the motion lane.
     SendMotion {
+        /// Recipient peer.
         to: PeerId,
+        /// Datagram to send.
         motion: Motion,
     },
     /// Consume local input instead of delivering it to local apps.
     Swallow(bool),
     /// Inject at `x`, `y` local to this device's screen.
     InjectMove {
+        /// Target x in logical coordinates local to this device's screen.
         x: i32,
+        /// Target y in logical coordinates local to this device's screen.
         y: i32,
     },
+    /// Inject a button press or release at the current cursor position.
     InjectButton {
+        /// Button to press or release.
         button: Button,
+        /// `true` for press, `false` for release.
         pressed: bool,
     },
+    /// Inject a key event, already remapped for this device's OS.
     InjectKey {
+        /// Usage page selector ORed with the HID usage id.
         code: u32,
+        /// `true` for key-down, `false` for key-up.
         pressed: bool,
     },
+    /// Inject a scroll event.
     InjectScroll {
+        /// Horizontal delta in `unit`s.
         dx: i32,
+        /// Vertical delta in `unit`s.
         dy: i32,
+        /// Unit of `dx` and `dy`.
         unit: ScrollUnit,
+        /// Position of this event within a continuous scroll.
         phase: Phase,
     },
     /// Release every key and button injected on this device.
     ReleaseAll,
 }
 
+/// Role of this device in the Desk's cursor handoff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
+    /// This device holds focus and its input goes to its own apps.
     Local,
+    /// Local input is swallowed and forwarded to the peer, which holds focus.
     Driving(PeerId),
+    /// The peer is the source: this device holds focus and injects that peer's input.
     Driven(PeerId),
 }
 
+/// The per-device cursor handoff state machine. Pure and I/O-free: time arrives as
+/// `now_ms` and side effects leave as [`Action`]s.
 pub struct Engine {
+    /// This device's identity.
     me: PeerId,
+    /// Operating system of every device on the Desk, this one included.
     os: BTreeMap<PeerId, Os>,
+    /// Owner of each screen, indexed like the layout's screens.
     screens: Vec<PeerId>,
+    /// Cursor position on the shared Desk layout.
     switcher: Switcher,
+    /// Current handoff role.
     mode: Mode,
     /// Keys and buttons we pressed on the peer we drive.
     sent_keys: HeldKeys,
+    /// Buttons we hold down on the peer we drive, in press order.
     sent_buttons: Vec<Button>,
     /// Buttons held on this device's own hardware.
     local_buttons: Vec<Button>,
+    /// Sequence number of the next outgoing motion datagram; wraps freely.
     seq: u32,
+    /// Filters incoming motion datagrams from the driving peer to the current focus period.
     gate: SeqGate,
+    /// `now_ms` when this device last entered `Driving` or `Driven`; the takeover hold
+    /// ([`TAKEOVER_HOLD_MS`]) counts from here.
     mode_since_ms: u64,
 }
 
@@ -137,10 +196,14 @@ impl Engine {
         })
     }
 
+    /// Current handoff role.
     pub fn mode(&self) -> Mode {
         self.mode
     }
 
+    /// Applies one event at monotonic time `now_ms` (milliseconds, any epoch) and
+    /// returns the actions to perform, in order. Events that do not apply in the
+    /// current mode are ignored and yield no actions.
     pub fn handle(&mut self, event: Event, now_ms: u64) -> Vec<Action> {
         match self.mode {
             Mode::Local => self.local(event, now_ms),
@@ -149,10 +212,12 @@ impl Engine {
         }
     }
 
+    /// Index of this device's screen in the layout.
     fn my_screen(&self) -> usize {
         self.screens.iter().position(|p| *p == self.me).expect("checked in new")
     }
 
+    /// Every other device on the Desk.
     fn others(&self) -> impl Iterator<Item = PeerId> + '_ {
         self.os.keys().copied().filter(move |p| *p != self.me)
     }
@@ -191,27 +256,35 @@ impl Engine {
         }
     }
 
+    /// Records a local hardware button change so focus never leaves mid-drag.
     fn track_local_button(&mut self, button: Button, pressed: bool) {
+        // Remove first so a repeated press cannot add a duplicate entry.
         self.local_buttons.retain(|b| *b != button);
         if pressed {
             self.local_buttons.push(button);
         }
     }
 
+    /// Becomes driven by `from`, starting a new focus period at motion sequence `seq`,
+    /// and moves the local cursor to the entry point (`x`, `y`).
     fn enter_driven(&mut self, from: PeerId, x: i32, y: i32, seq: u32, now_ms: u64) -> Vec<Action> {
         self.mode = Mode::Driven(from);
         self.mode_since_ms = now_ms;
+        // A fresh gate per driver, so a previous driver's sequence numbers cannot interfere.
         self.gate = SeqGate::default();
         self.gate.start_at(seq);
         self.switcher.set_local(self.my_screen(), x, y);
         vec![Action::InjectMove { x, y }]
     }
 
+    /// Handles `event` in [`Mode::Local`]: watches for the cursor leaving this screen and
+    /// for a peer handing focus to this device.
     fn local(&mut self, event: Event, now_ms: u64) -> Vec<Action> {
         match event {
             Event::LocalMove { dx, dy, x, y } => {
                 let me = self.my_screen();
                 self.switcher.set_local(me, x, y);
+                // A local drag must not carry the cursor onto another device.
                 if !self.local_buttons.is_empty() {
                     return vec![];
                 }
@@ -257,12 +330,15 @@ impl Engine {
         }
     }
 
+    /// Ends driving `peer`: releases what we hold there and returns local input to local apps.
     fn leave_driving(&mut self, peer: PeerId, out: &mut Vec<Action>) {
         self.release_sent(peer, out);
         out.push(Action::Swallow(false));
         self.mode = Mode::Local;
     }
 
+    /// Handles `event` in [`Mode::Driving`]: forwards local input to `peer` and moves
+    /// focus when the dead-reckoned cursor crosses onto another screen.
     fn driving(&mut self, peer: PeerId, event: Event, now_ms: u64) -> Vec<Action> {
         let mut out = Vec::new();
         match event {
@@ -335,6 +411,7 @@ impl Engine {
                 out.push(Action::InjectMove { x, y });
             }
             Event::PeerLost(lost) if lost == peer => {
+                // The peer is gone, so there is nobody to send key-ups to: just forget them.
                 self.sent_keys.release_all();
                 self.sent_buttons.clear();
                 out.push(Action::Swallow(false));
@@ -355,8 +432,12 @@ impl Engine {
         out
     }
 
+    /// Handles `event` in [`Mode::Driven`]: injects input from `driver` only, and lets
+    /// local input take focus back once the takeover hold has passed.
     fn driven(&mut self, driver: PeerId, event: Event, now_ms: u64) -> Vec<Action> {
+        // Saturating: a clock that steps backwards must not underflow.
         let held = now_ms.saturating_sub(self.mode_since_ms) < TAKEOVER_HOLD_MS;
+        // Local input wins: release everything injected and tell every peer focus is here.
         let takeover = |me: &mut Self, x: i32, y: i32| {
             me.mode = Mode::Local;
             me.switcher.set_local(me.my_screen(), x, y);
@@ -371,11 +452,14 @@ impl Engine {
                     self.switcher.set_local(self.my_screen(), x, y);
                     vec![Action::InjectMove { x, y }]
                 }
+                // The driver moved focus elsewhere; this device is no longer the target.
                 Control::Focus { .. } => {
                     self.mode = Mode::Local;
                     vec![Action::ReleaseAll]
                 }
                 Control::Key { code, pressed } => {
+                    // Only the receiver remaps, so a key is translated exactly once. An
+                    // unknown OS falls back to Linux, which follows the PC convention.
                     let from_os = self.os.get(&from).copied().unwrap_or(Os::Linux);
                     let to_os = self.os.get(&self.me).copied().unwrap_or(Os::Linux);
                     vec![Action::InjectKey {
@@ -404,6 +488,7 @@ impl Engine {
             Event::LocalMove { dx, dy, x, y } if !held && dx.abs() + dy.abs() >= TAKEOVER_MIN_MOVE => {
                 takeover(self, x, y)
             }
+            // Escape is the failsafe, so it takes over even inside the hold.
             Event::LocalKey { pressed: true, .. } | Event::LocalButton { pressed: true, .. } | Event::Escape
                 if !held || event == Event::Escape =>
             {

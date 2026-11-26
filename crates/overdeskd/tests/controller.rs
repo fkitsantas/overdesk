@@ -11,6 +11,7 @@ use overdeskd::controller::{AppState, Command, Config, Phase, spawn};
 use overdeskd::{Platform, Side};
 use tokio::sync::watch;
 
+/// A platform that ignores every action, for tests that only watch controller state.
 #[derive(Clone)]
 struct Fake;
 
@@ -19,12 +20,14 @@ impl Platform for Fake {
     fn inject(&self, _action: Action) {}
 }
 
+/// A fresh, empty store folder for one controller.
 fn store(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("overdesk-ctl-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     d
 }
 
+/// A loopback controller configuration for a device with the given name, OS and screen.
 fn config(name: &str, os: Os, w: u32, h: u32) -> Config {
     Config {
         store_dir: store(name),
@@ -38,6 +41,8 @@ fn config(name: &str, os: Os, w: u32, h: u32) -> Config {
     }
 }
 
+/// Waits up to ten seconds for the controller's phase to satisfy `ok`, then returns
+/// that state; panics with `what` on timeout or if the controller stops.
 async fn wait(rx: &mut watch::Receiver<AppState>, what: &str, ok: impl Fn(&Phase) -> bool) -> AppState {
     let got = tokio::time::timeout(Duration::from_secs(10), async {
         rx.wait_for(|s| ok(&s.phase)).await.map(|s| s.clone())

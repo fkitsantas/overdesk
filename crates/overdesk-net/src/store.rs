@@ -10,15 +10,28 @@ use std::path::{Path, PathBuf};
 use crate::pairing::Fingerprint;
 use crate::transport::{Identity, NetError};
 
+/// A directory holding this device's identity (`cert.der`, `key.der`) and its pinned
+/// peers (`pins.txt`, one hex fingerprint per line).
+///
+/// Anyone who can read the directory can impersonate this device, and anyone who can
+/// write it can add a trusted peer, so it is kept owner-only.
 pub struct Store {
+    /// Path of the store directory.
     dir: PathBuf,
 }
 
+/// Wraps any displayable error as [`NetError::Io`], for use with `map_err`.
 fn io(e: impl std::fmt::Display) -> NetError {
     NetError::Io(e.to_string())
 }
 
 /// Writes via a temp file and rename, so a crash mid-write never leaves a half file.
+/// On Unix the file is created with mode 0600, so the key is never briefly readable by
+/// others.
+///
+/// # Errors
+///
+/// Returns [`NetError::Io`] if the file cannot be written, synced or renamed.
 fn write_private(path: &Path, bytes: &[u8]) -> Result<(), NetError> {
     let tmp = path.with_extension("tmp");
     let mut opts = std::fs::OpenOptions::new();
@@ -31,10 +44,14 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), NetError> {
     std::fs::rename(&tmp, path).map_err(io)
 }
 
+/// Lower-case hex encoding of a fingerprint: 64 characters.
 fn hex(fp: &Fingerprint) -> String {
     fp.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Parses exactly 64 hex characters back into a fingerprint. Returns `None` for any
+/// other length, non-ASCII input or non-hex digit, so a malformed line never panics on
+/// a slice boundary.
 fn unhex(line: &str) -> Option<Fingerprint> {
     if line.len() != 64 || !line.is_ascii() {
         return None;
@@ -48,6 +65,14 @@ fn unhex(line: &str) -> Option<Fingerprint> {
 
 impl Store {
     /// Opens (creating if needed) the store directory, owner-only.
+    ///
+    /// On Unix the directory mode is reset to 0700 every time, so loosened permissions
+    /// are tightened again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::Io`] if the directory cannot be created or its permissions
+    /// set.
     pub fn open(dir: impl Into<PathBuf>) -> Result<Self, NetError> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir).map_err(io)?;
@@ -60,6 +85,14 @@ impl Store {
     }
 
     /// Loads this device's identity, generating and saving one on first run.
+    ///
+    /// If either file is missing or unreadable a new identity is generated, which
+    /// changes this device's fingerprint, so every peer must pair again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::Tls`] if generation fails and [`NetError::Io`] if the new
+    /// identity cannot be saved.
     pub fn identity(&self) -> Result<Identity, NetError> {
         let (cert_path, key_path) = (self.dir.join("cert.der"), self.dir.join("key.der"));
         match (std::fs::read(&cert_path), std::fs::read(&key_path)) {
@@ -67,6 +100,8 @@ impl Store {
             _ => {
                 let id = Identity::generate()?;
                 let (cert, key) = id.to_der();
+                // Key first: a crash between the writes then leaves no certificate, so
+                // the next run regenerates instead of loading a certificate without its key.
                 write_private(&key_path, &key)?;
                 write_private(&cert_path, &cert)?;
                 Ok(id)
@@ -74,6 +109,13 @@ impl Store {
         }
     }
 
+    /// The set of pinned peer fingerprints; empty if nothing has been pinned yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::Io`] if the file cannot be read or any line is not a valid
+    /// fingerprint. A corrupt file is reported rather than skipped, so a damaged pin
+    /// list never silently changes who is trusted.
     pub fn pins(&self) -> Result<BTreeSet<Fingerprint>, NetError> {
         let text = match std::fs::read_to_string(self.dir.join("pins.txt")) {
             Ok(t) => t,
@@ -86,6 +128,13 @@ impl Store {
             .collect()
     }
 
+    /// Adds `fp` to the pinned peers and rewrites the file atomically. Pinning an
+    /// existing fingerprint is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::Io`] if the current pins cannot be read or the file cannot
+    /// be written.
     pub fn pin(&self, fp: Fingerprint) -> Result<(), NetError> {
         let mut pins = self.pins()?;
         pins.insert(fp);

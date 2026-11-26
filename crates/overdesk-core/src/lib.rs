@@ -11,26 +11,34 @@ pub use overdesk_proto::{Desk, DeskScreen, Os, PeerId};
 /// Screen rectangle in the shared logical (DPI-independent) desktop plane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
+    /// Left edge in global logical coordinates.
     pub x: i32,
+    /// Top edge in global logical coordinates.
     pub y: i32,
+    /// Width in logical pixels.
     pub w: u32,
+    /// Height in logical pixels.
     pub h: u32,
 }
 
 impl Rect {
+    /// Exclusive right edge (`x + w`) in global logical coordinates.
     // i64 so x + w cannot overflow; Layout::new guarantees results fit i32.
     fn right(&self) -> i64 {
         self.x as i64 + self.w as i64
     }
 
+    /// Exclusive bottom edge (`y + h`) in global logical coordinates.
     fn bottom(&self) -> i64 {
         self.y as i64 + self.h as i64
     }
 
+    /// Whether the global point lies inside; right and bottom edges are exclusive.
     fn contains(&self, (x, y): (i64, i64)) -> bool {
         (self.x as i64..self.right()).contains(&x) && (self.y as i64..self.bottom()).contains(&y)
     }
 
+    /// Nearest pixel inside the rectangle to the global point. Requires a non-zero size.
     fn clamp(&self, (x, y): (i64, i64)) -> (i64, i64) {
         (
             x.clamp(self.x as i64, self.right() - 1),
@@ -38,6 +46,7 @@ impl Rect {
         )
     }
 
+    /// Whether the two rectangles share any pixel; rectangles that only touch do not.
     fn overlaps(&self, o: &Rect) -> bool {
         (self.x as i64) < o.right()
             && (o.x as i64) < self.right()
@@ -46,27 +55,41 @@ impl Rect {
     }
 }
 
+/// A named screen placed in the shared logical plane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Screen {
+    /// Name, unique within a [`Layout`].
     pub name: String,
+    /// Position and size in global logical coordinates.
     pub rect: Rect,
 }
 
+/// Why a set of screens does not form a valid [`Layout`]. Variants carry screen names.
 #[derive(Debug, PartialEq, Eq)]
 pub enum LayoutError {
+    /// The layout has no screens.
     Empty,
+    /// The named screen has zero width or height.
     ZeroSize(String),
+    /// The named screen's size or far edge does not fit in `i32` coordinates.
     OutOfRange(String),
+    /// Two screens share this name.
     DuplicateName(String),
+    /// The two named screens overlap; the first comes earlier in the list.
     Overlap(String, String),
 }
 
+/// A validated arrangement of screens: non-empty, uniquely named, non-zero sized,
+/// non-overlapping, and with every coordinate representable as `i32`.
 #[derive(Debug, Clone)]
 pub struct Layout {
+    /// Screens in input order; their index is the screen id used by [`Switcher`].
     screens: Vec<Screen>,
 }
 
 impl Layout {
+    /// Validates `screens` and builds a layout, reporting the first violation found.
+    /// The overlap check is O(n²); callers bound `n` for untrusted input (see [`MAX_SCREENS`]).
     pub fn new(screens: Vec<Screen>) -> Result<Self, LayoutError> {
         if screens.is_empty() {
             return Err(LayoutError::Empty);
@@ -92,10 +115,12 @@ impl Layout {
         Ok(Self { screens })
     }
 
+    /// Index of the screen containing the global point `p`, if any.
     fn find(&self, p: (i64, i64)) -> Option<usize> {
         self.screens.iter().position(|s| s.rect.contains(p))
     }
 
+    /// Screens in their original order, indexed by screen id.
     pub fn screens(&self) -> &[Screen] {
         &self.screens
     }
@@ -116,15 +141,36 @@ fn touches(cur: &Rect, n: &Rect, sx: i64, sy: i64) -> bool {
 /// Result of a relative cursor move. Coordinates are local to `screen` / `to`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Motion {
-    Within { screen: usize, x: i32, y: i32 },
-    Switched { from: usize, to: usize, x: i32, y: i32 },
+    /// The cursor stayed on `screen`, possibly clamped against an edge with no neighbour.
+    Within {
+        /// Index of the screen that still holds the cursor.
+        screen: usize,
+        /// New x, local to `screen`.
+        x: i32,
+        /// New y, local to `screen`.
+        y: i32,
+    },
+    /// The cursor crossed an edge from screen `from` onto screen `to`.
+    Switched {
+        /// Index of the screen the cursor left.
+        from: usize,
+        /// Index of the screen the cursor entered.
+        to: usize,
+        /// Entry x, local to `to`.
+        x: i32,
+        /// Entry y, local to `to`.
+        y: i32,
+    },
 }
 
 /// Tracks which screen owns the cursor, driven by relative mouse deltas.
 #[derive(Debug)]
 pub struct Switcher {
+    /// Screens the cursor can move across.
     layout: Layout,
+    /// Index of the screen that holds the cursor.
     active: usize,
+    /// Cursor position in global logical coordinates; always inside `active`.
     pos: (i32, i32),
 }
 
@@ -140,15 +186,18 @@ impl Switcher {
         })
     }
 
+    /// Index of the screen that holds the cursor.
     pub fn active(&self) -> usize {
         self.active
     }
 
+    /// The layout the cursor moves across.
     pub fn layout(&self) -> &Layout {
         &self.layout
     }
 
     /// Re-syncs to where the OS says the cursor is (`x`, `y` local to `screen`), clamped.
+    /// Panics if `screen` is not an index into the layout.
     pub fn set_local(&mut self, screen: usize, x: i32, y: i32) {
         let r = self.layout.screens[screen].rect;
         let p = r.clamp((r.x as i64 + x as i64, r.y as i64 + y as i64));
@@ -162,6 +211,8 @@ impl Switcher {
         (self.active, self.pos.0 - r.x, self.pos.1 - r.y)
     }
 
+    /// Moves the cursor by a relative delta in logical pixels. Crossing an edge that
+    /// touches another screen switches to it; an edge with no neighbour clamps the cursor.
     pub fn move_by(&mut self, dx: i32, dy: i32) -> Motion {
         let from = self.active;
         let target = (self.pos.0 as i64 + dx as i64, self.pos.1 as i64 + dy as i64);
@@ -170,6 +221,7 @@ impl Switcher {
             return self.settle(target, |screen, x, y| Motion::Within { screen, x, y });
         }
         let edge = cur.clamp(target);
+        // Exit direction per axis: -1, 0 or 1, from how far the target overshot the edge.
         let (sx, sy) = ((target.0 - edge.0).signum(), (target.1 - edge.1).signum());
         // Straight exit with exactly one screen along that edge: map the position along
         // the edge proportionally, so screens of different sizes have no dead zones.
@@ -180,6 +232,7 @@ impl Switcher {
                 .iter()
                 .enumerate()
                 .filter(|(i, s)| *i != from && touches(&cur, &s.rect, sx, sy));
+            // Taking two items tells "exactly one neighbour" apart from "several".
             if let (Some((to, n)), None) = (along.next(), along.next()) {
                 let n = n.rect;
                 let landing = if sx != 0 {
@@ -221,10 +274,12 @@ impl Switcher {
 pub struct HeldKeys(BTreeSet<u32>);
 
 impl HeldKeys {
+    /// Records `code` as held; pressing an already held code is a no-op (auto-repeat).
     pub fn press(&mut self, code: u32) {
         self.0.insert(code);
     }
 
+    /// Forgets `code`; releasing a code that is not held is a no-op.
     pub fn release(&mut self, code: u32) {
         self.0.remove(&code);
     }
@@ -259,12 +314,16 @@ pub const MAX_SCREENS: usize = 64;
 /// broken; it would otherwise let one peer saturate the version and lock out edits.
 pub const MAX_VERSION_JUMP: u64 = 1 << 20;
 
+/// Why a received Desk document was refused by [`adopt`].
 #[derive(Debug, PartialEq, Eq)]
 pub enum DeskError {
+    /// The screens do not form a valid [`Layout`].
     Layout(LayoutError),
     /// The document's `author` is not the authenticated peer that sent it.
     NotAuthor,
+    /// The version moves forward by more than [`MAX_VERSION_JUMP`].
     VersionJump,
+    /// The document has more than [`MAX_SCREENS`] screens.
     TooManyScreens,
     /// A screen belongs to a peer this device has not paired with.
     UnknownPeer(PeerId),
@@ -286,6 +345,7 @@ pub fn adopt(
     if (incoming.version, incoming.author) <= (current.version, current.author) {
         return Ok(None);
     }
+    // Cannot underflow: passing the check above implies incoming.version >= current.version.
     if incoming.version - current.version > MAX_VERSION_JUMP {
         return Err(DeskError::VersionJump);
     }

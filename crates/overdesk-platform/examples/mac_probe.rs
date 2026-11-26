@@ -5,6 +5,7 @@
 //!   cargo run -p overdesk-platform --example mac_probe -- inject   # draw a small square, scroll, tap Shift
 //!   cargo run -p overdesk-platform --example mac_probe -- jump     # inject a jump, then print your next real moves
 
+/// Checks both permissions, then runs the subcommand named by the first argument.
 #[cfg(target_os = "macos")]
 fn main() {
     use overdesk_platform::mac::ffi::{Capture, Injector, permissions, request_permissions};
@@ -94,6 +95,7 @@ fn main() {
     }
 }
 
+/// Stub so the example builds, and `--all-targets` checks pass, on other systems.
 #[cfg(not(target_os = "macos"))]
 fn main() {
     println!("mac_probe runs on macOS only");

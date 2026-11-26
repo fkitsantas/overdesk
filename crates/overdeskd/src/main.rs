@@ -23,18 +23,28 @@ use overdesk_proto::Os;
 use overdeskd::{Platform, Side, establish, run};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+/// The port `listen` binds to when no address is given.
 const DEFAULT_PORT: u16 = 24801;
 
+/// The parsed command line.
 struct Args {
+    /// The address to accept connections on, when running `listen`.
     listen: Option<SocketAddr>,
+    /// The address to dial, when running `connect`.
     connect: Option<SocketAddr>,
+    /// Whether an unknown device may pair after both users confirm the code.
     pair: bool,
+    /// Whether to print actions instead of touching real input.
     headless: bool,
+    /// Where the peer's screen sits; only the dialer's choice counts.
     side: Side,
+    /// This device's name, as shown to the peer.
     name: String,
+    /// Quit unconditionally after this many seconds, if set.
     exit_after: Option<u64>,
 }
 
+/// Parses the command line, returning a usage message on error.
 fn parse() -> Result<Args, String> {
     let mut a = std::env::args().skip(1);
     let default_listen = SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT));
@@ -71,6 +81,7 @@ fn parse() -> Result<Args, String> {
                 let secs = a.next().ok_or("--exit-after needs seconds")?;
                 args.exit_after = Some(secs.parse().map_err(|e| format!("--exit-after {secs}: {e}"))?);
             }
+            // After `listen`, a bare argument is the address to bind.
             other if args.listen.is_some() => args.listen = Some(other.parse().map_err(|e| format!("{other}: {e}"))?),
             other => return Err(format!("unknown argument {other}")),
         }
@@ -78,6 +89,7 @@ fn parse() -> Result<Args, String> {
     Ok(args)
 }
 
+/// Where the identity and pinned peers live: `OVERDESK_HOME`, or the per-OS default.
 fn store_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("OVERDESK_HOME") {
         return dir.into();
@@ -90,6 +102,7 @@ fn store_dir() -> PathBuf {
     }
 }
 
+/// A [`Platform`] that prints what it would do, for testing without real input.
 #[derive(Clone)]
 struct Headless;
 
@@ -102,6 +115,7 @@ impl Platform for Headless {
     }
 }
 
+/// Shows the pairing code and reads the user's yes or no from stdin.
 async fn ask(code: u32) -> bool {
     println!(
         "Pairing code: {:03} {:03}. Does the other screen show the same? [y/N]",
@@ -152,6 +166,7 @@ async fn session(mut link: Link, store: &Store, args: &Args, me: &Me, platform: 
     }
 }
 
+/// Opens the store, binds a node, then dials once or accepts sessions until stopped.
 async fn serve(args: Args, platform: impl Platform + Clone, me: Me) -> Result<(), String> {
     let store = Store::open(store_dir()).map_err(|e| e.to_string())?;
     let id = store.identity().map_err(|e| e.to_string())?;
@@ -179,6 +194,7 @@ async fn serve(args: Args, platform: impl Platform + Clone, me: Me) -> Result<()
     Ok(())
 }
 
+/// Parses arguments, arms the optional exit timer, and serves on the chosen platform.
 #[tokio::main]
 async fn main() -> ExitCode {
     let args = match parse() {
@@ -215,6 +231,7 @@ async fn main() -> ExitCode {
     }
 }
 
+/// Starts the real input adapter and serves with this device's display size.
 #[cfg(any(target_os = "macos", windows))]
 async fn start_native(args: Args) -> Result<(), String> {
     let (width, height) = overdeskd::native::main_display_size();
@@ -229,6 +246,7 @@ async fn start_native(args: Args) -> Result<(), String> {
     serve(args, platform, me).await
 }
 
+/// Fails on operating systems without an input adapter.
 #[cfg(not(any(target_os = "macos", windows)))]
 async fn start_native(_args: Args) -> Result<(), String> {
     Err("no input adapter for this OS yet; use --headless".into())

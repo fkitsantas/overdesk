@@ -145,10 +145,16 @@ const INJECT_ALIASES: &[(u32, u16)] = &[
     (0x81, 0xE02E), // Volume down
 ];
 
+/// Translates a Set 1 scan code (with `0xE0` in the high byte for extended keys, as
+/// reported by the `WH_KEYBOARD_LL` hook) to its Overdesk code, or `None` for keys
+/// Overdesk does not map.
 pub fn scan_to_code(scan: u16) -> Option<u32> {
     KEYS.iter().find(|k| k.0 == scan).map(|k| k.1)
 }
 
+/// Translates an Overdesk code to the Set 1 scan code `SendInput` injects for it, or
+/// `None` when Windows has no such key. Falls back to `INJECT_ALIASES` so Mac
+/// keyboard-page media keys still work.
 pub fn code_to_scan(code: u32) -> Option<u16> {
     KEYS.iter()
         .find(|k| k.1 == code)

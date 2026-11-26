@@ -16,64 +16,100 @@ use tokio::task::JoinHandle;
 
 use crate::{DaemonError, Platform, Session, Side, establish, run};
 
+/// What the controller needs to start: where to keep state, where to listen, and who
+/// this device is.
 pub struct Config {
+    /// The folder that holds this device's identity and its pinned peers.
     pub store_dir: PathBuf,
+    /// The address to accept incoming connections on.
     pub listen: SocketAddr,
+    /// This device's name, operating system and screen size, sent to every peer.
     pub me: Me,
 }
 
+/// Where the controller is in its connection lifecycle; the UI picks its screen from this.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Phase {
+    /// Not connected and not trying to; ready for a [`Command::Connect`].
     Idle,
+    /// Dialing another device.
     Connecting {
+        /// The address being dialed.
         address: SocketAddr,
     },
     /// Show `code`; the user answers with [`Command::AnswerCode`].
     Pairing {
+        /// The other device, by IP address (it has not introduced itself yet).
         peer: String,
+        /// The six-digit code both screens must show.
         code: u32,
     },
+    /// A session is running.
     Connected {
+        /// The peer's device name.
         peer: String,
+        /// The peer's operating system.
         peer_os: Os,
+        /// Where the cursor is: on this device, driving the peer, or driven by it.
         mode: Mode,
     },
+    /// The session ended because the peer went away; input is back on this device.
     Lost {
+        /// The device name of the peer that was lost.
         peer: String,
     },
+    /// Connecting, pairing or setting up the Desk failed, with a message for people.
     Error(String),
 }
 
 /// One screen of the shared Desk, named for people.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenView {
+    /// The device name shown on the screen.
     pub name: String,
+    /// The screen's left edge in Desk coordinates.
     pub x: i32,
+    /// The screen's top edge in Desk coordinates.
     pub y: i32,
+    /// The screen's width in pixels.
     pub w: u32,
+    /// The screen's height in pixels.
     pub h: u32,
+    /// Whether this screen belongs to this device.
     pub me: bool,
 }
 
+/// Everything the UI shows, published by the controller after every change.
+/// The UI renders it and holds no connection state of its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppState {
+    /// This device's name.
     pub name: String,
+    /// This device's operating system.
     pub os: Os,
     /// Where other devices can reach this one.
     pub address: Option<SocketAddr>,
+    /// The current connection lifecycle phase.
     pub phase: Phase,
+    /// The screens of the shared Desk; empty unless connected.
     pub desk: Vec<ScreenView>,
     /// Whether unknown devices may currently start pairing with this one.
     pub pairing_open: bool,
 }
 
+/// What the UI asks the controller to do. Commands are the controller's only input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    /// Dial another device and, once trusted, share a Desk with it.
     Connect {
+        /// The other device's address.
         address: SocketAddr,
+        /// Where the other device's screen sits relative to this one.
         side: Side,
     },
+    /// The user's answer to the pairing code: `true` if both screens match.
     AnswerCode(bool),
+    /// End the current session or attempt, or dismiss a result, and return to idle.
     Disconnect,
     /// Opens (for [`PAIRING_WINDOW`]) or closes pairing for devices that dial in.
     AllowPairing(bool),
@@ -82,27 +118,35 @@ pub enum Command {
 /// How long "Pair a device" stays open for incoming devices.
 pub const PAIRING_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// Why the controller could not start.
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
+    /// The settings folder could not be opened, or the identity could not be loaded.
     #[error("could not open the settings folder: {0}")]
     Store(String),
+    /// The listening socket could not be bound.
     #[error("could not listen for other devices: {0}")]
     Bind(String),
 }
 
 /// Everything a session task needs from the controller.
 struct Shared<P> {
+    /// Publishes [`AppState`] to the UI.
     state: watch::Sender<AppState>,
     /// Where the user's answer to the current pairing code goes.
     answer: Mutex<Option<oneshot::Sender<bool>>>,
     /// Until when unknown devices dialing in may pair. Closed by default.
     pairing_until: Mutex<Option<tokio::time::Instant>>,
+    /// This device's identity and pinned peers.
     store: Store,
+    /// Who this device is, as sent to peers.
     me: Me,
+    /// The OS adapter that captures and injects input.
     platform: P,
 }
 
 impl<P> Shared<P> {
+    /// Whether an unknown device dialing in may start pairing right now.
     fn pairing_allowed(&self) -> bool {
         self.pairing_until
             .lock()
@@ -110,11 +154,13 @@ impl<P> Shared<P> {
             .is_some_and(|t| tokio::time::Instant::now() < t)
     }
 
+    /// Opens pairing until `until`, or closes it with `None`, and tells the UI.
     fn set_pairing(&self, until: Option<tokio::time::Instant>) {
         *self.pairing_until.lock().expect("pairing lock") = until;
         self.state.send_modify(|s| s.pairing_open = until.is_some());
     }
 
+    /// Publishes a new phase and, if given, a new Desk view.
     fn set(&self, phase: Phase, desk: Option<Vec<ScreenView>>) {
         self.state.send_modify(|s| {
             s.phase = phase;
@@ -154,6 +200,8 @@ pub async fn spawn<P: Platform + Clone + Sync>(
     Ok((commands, state_rx))
 }
 
+/// The controller's main loop: handles UI commands and incoming connections, and runs
+/// at most one session task at a time.
 async fn control<P: Platform + Clone + Sync>(
     node: Arc<Node>,
     shared: Arc<Shared<P>>,
@@ -161,6 +209,7 @@ async fn control<P: Platform + Clone + Sync>(
 ) {
     // shortcut: one session at a time (Free tier: 2 devices); Pro runs one per peer.
     let mut active: Option<JoinHandle<()>> = None;
+    // A finished handle counts as idle: the last session ended on its own.
     let busy = |a: &Option<JoinHandle<()>>| a.as_ref().is_some_and(|h| !h.is_finished());
     loop {
         tokio::select! {
@@ -233,6 +282,7 @@ async fn session<P: Platform + Clone + Sync>(
         Err(e) => return shared.set(Phase::Error(format!("Couldn't connect: {e}")), None),
     };
     let peer_fp = link.peer_fingerprint();
+    // An unknown device: pairing is the only way in.
     if !shared.store.pins().unwrap_or_default().contains(&peer_fp) {
         if inbound && !shared.pairing_allowed() {
             // Deny by default: no prompt, no state change, nothing for a stranger to probe.
@@ -268,6 +318,7 @@ async fn session<P: Platform + Clone + Sync>(
             Err(e) => return shared.set(Phase::Error(format!("Pairing failed: {e}")), None),
         }
     }
+    // Read the pins again: pairing may have just added this peer.
     let pins = shared.store.pins().unwrap_or_default();
     let s = match establish(link, |fp| pins.contains(fp), &shared.me, side).await {
         Ok(s) => s,
@@ -288,6 +339,7 @@ async fn session<P: Platform + Clone + Sync>(
     let watcher = shared.clone();
     let on_mode = move |mode: Mode| {
         watcher.state.send_modify(|st| {
+            // Mode changes only patch a running session; a later phase must never be overwritten.
             if let Phase::Connected { mode: m, .. } = &mut st.phase {
                 *m = mode;
             }
@@ -297,6 +349,8 @@ async fn session<P: Platform + Clone + Sync>(
     shared.set(Phase::Lost { peer }, Some(Vec::new()));
 }
 
+/// Turns the session's Desk into screens named for people: this device's name for its
+/// own screen and the peer's name for the other.
 fn desk_view(s: &Session, my_name: &str) -> Vec<ScreenView> {
     let name = |p: &PeerId| {
         if *p == s.me {

@@ -43,15 +43,22 @@ use crate::mac::events::{Held, LocalDowns};
 /// Put in `dwExtraInfo` of everything we inject, so our own hooks skip it. Every peer
 /// both captures and injects; without this, input would loop forever.
 const INJECTED_TAG: usize = 0x4F56_4552; // "OVER"
+/// `XBUTTON1` in `mouseData`: the first extra button, "Back" in browsers.
 const XBUTTON1: u32 = 1;
+/// `XBUTTON2` in `mouseData`: the second extra button, "Forward" in browsers.
 const XBUTTON2: u32 = 2;
 /// Raw Input `usFlags`: absolute pointing devices (pens, RDP) have no deltas.
 const MOUSE_MOVE_ABSOLUTE: u16 = 1;
 
+/// Why the Windows adapter could not start.
 #[derive(Debug, PartialEq, Eq)]
 pub enum WinError {
+    /// `SetWindowsHookExW` failed for the low-level keyboard or mouse hook, or the
+    /// capture thread could not be spawned or died before reporting in.
     HookFailed,
+    /// The hidden message-only window that receives Raw Input could not be created.
     WindowFailed,
+    /// `RegisterRawInputDevices` rejected the mouse registration.
     RawInputFailed,
 }
 
@@ -82,20 +89,33 @@ pub fn permissions() -> (bool, bool) {
     (true, true)
 }
 
+/// Does nothing: Windows has no input permissions to request. Exists so both adapters
+/// expose the same API.
 pub fn request_permissions() {}
 
+/// State shared by the hook procedures and the Raw Input window procedure. Win32 hook
+/// callbacks take no user pointer, so it lives in the capture thread's [`CTX`].
 struct HookCtx {
+    /// Where captured input goes; the receiving end belongs to the engine.
     tx: Sender<Captured>,
+    /// Set while focus is on another peer, so local input is consumed. Shared with
+    /// [`Capture::set_swallow`].
     swallow: Arc<AtomicBool>,
+    /// Keeps local apps' press/release pairs balanced across swallow changes.
     local: LocalDowns,
+    /// Failsafe detector for the escape chord.
     chord: EscapeChord,
 }
 
 thread_local! {
+    /// The capture thread's hook state; `None` on every other thread and after
+    /// capture ends.
     // Hooks and the Raw Input window procedure all run on the capture thread.
     static CTX: RefCell<Option<HookCtx>> = const { RefCell::new(None) };
 }
 
+/// Sends one captured event to the engine, turning swallowing off if the engine has
+/// gone so local input can never be lost.
 fn send(ctx: &HookCtx, c: Captured) {
     // Nobody listening any more (engine gone): never keep swallowing input.
     if ctx.tx.send(c).is_err() {
@@ -115,6 +135,14 @@ fn edge(ctx: &mut HookCtx, held: Held, down: bool) -> bool {
     ctx.local.deliver_locally(held, down, swallowing)
 }
 
+/// `WH_KEYBOARD_LL` hook procedure. Forwards every physical key edge and returns a
+/// non-zero value to consume the key while swallowing; injected keys (tagged with
+/// [`INJECTED_TAG`]) and non-`HC_ACTION` calls go straight to the next hook.
+///
+/// # Safety
+///
+/// Called only by Windows on the capture thread, with `lparam` pointing to a valid
+/// `KBDLLHOOKSTRUCT` whenever `code` is `HC_ACTION`.
 unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     // SAFETY: for HC_ACTION, lparam points to a KBDLLHOOKSTRUCT valid for this call.
     let pass = || unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) };
@@ -125,6 +153,8 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
     if k.dwExtraInfo == INJECTED_TAG {
         return pass();
     }
+    // Rebuild the `0xE0nn` form the keymap uses: the hook reports the extended prefix
+    // as a flag instead of in the scan code.
     let base = k.scanCode as u16 & 0xFF;
     let scan = if k.flags & LLKHF_EXTENDED != 0 {
         0xE000 | base
@@ -136,6 +166,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
         return pass();
     };
     let down = k.flags & LLKHF_UP == 0;
+    // No context means capture is shutting down: always let the key through.
     let deliver = CTX.with_borrow_mut(|c| {
         c.as_mut().is_none_or(|ctx| {
             send(
@@ -148,9 +179,18 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
             edge(ctx, Held::Key(code_), down)
         })
     });
+    // A non-zero return from a low-level hook discards the event system-wide.
     if deliver { pass() } else { 1 }
 }
 
+/// `WH_MOUSE_LL` hook procedure. Forwards buttons and wheel steps, and consumes them
+/// and cursor moves while swallowing. Motion deltas are not taken from here: they come
+/// from Raw Input in [`raw_input_window`].
+///
+/// # Safety
+///
+/// Called only by Windows on the capture thread, with `lparam` pointing to a valid
+/// `MSLLHOOKSTRUCT` whenever `code` is `HC_ACTION`.
 unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     // SAFETY: for HC_ACTION, lparam points to an MSLLHOOKSTRUCT valid for this call.
     let pass = || unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) };
@@ -161,6 +201,8 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
     if m.dwExtraInfo == INJECTED_TAG {
         return pass();
     }
+    // The high word of `mouseData` is the X button number for X button messages and
+    // the signed wheel delta (multiples of `WHEEL_DELTA`, 120) for wheel messages.
     let hi = (m.mouseData >> 16) as u16;
     let button = |b, down| {
         Some((
@@ -227,6 +269,14 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
     if deliver { pass() } else { 1 }
 }
 
+/// Window procedure of the hidden message-only window registered for Raw Input. Turns
+/// `WM_INPUT` mouse reports into [`Captured::Moved`] with unaccelerated device deltas,
+/// which keep flowing even when the cursor is pinned or at a screen edge.
+///
+/// # Safety
+///
+/// Called only by Windows, on the capture thread that created the window, with
+/// message parameters matching `msg`.
 unsafe extern "system" fn raw_input_window(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if msg == WM_INPUT {
         let mut raw: RAWINPUT = unsafe { std::mem::zeroed() };
@@ -274,12 +324,19 @@ unsafe extern "system" fn raw_input_window(hwnd: HWND, msg: u32, wparam: WPARAM,
 
 /// A running capture thread. Dropping it unhooks and stops the thread.
 pub struct Capture {
+    /// Shared with the hooks; see [`Capture::set_swallow`].
     swallow: Arc<AtomicBool>,
+    /// Win32 id of the capture thread, the target of the `WM_QUIT` sent on drop.
     thread_id: u32,
+    /// The capture thread; `None` only after it has been joined.
     thread: Option<JoinHandle<()>>,
 }
 
 impl Capture {
+    /// Starts capture on its own message-loop thread and returns the receiver of
+    /// captured input. Input reaches local apps unmodified until
+    /// [`Capture::set_swallow`] is turned on. Waits until the hooks and Raw Input are in
+    /// place, so an error is reported here rather than lost on the thread.
     pub fn start() -> Result<(Self, Receiver<Captured>), WinError> {
         ensure_dpi_aware();
         let (tx, rx) = channel();
@@ -317,10 +374,15 @@ impl Drop for Capture {
     }
 }
 
+/// Encodes `s` as a NUL-terminated UTF-16 string for wide (`W`) Win32 APIs.
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 
+/// Body of the capture thread: installs [`CTX`], creates the Raw Input window,
+/// registers the mouse for Raw Input and installs both low-level hooks, reports its
+/// thread id (or the first failure) on `ready`, then pumps messages until `WM_QUIT`.
+/// Low-level hooks only run while their installing thread pumps messages.
 fn run_capture(tx: Sender<Captured>, swallow: Arc<AtomicBool>, ready: Sender<Result<u32, WinError>>) {
     CTX.with_borrow_mut(|c| {
         *c = Some(HookCtx {
@@ -359,6 +421,8 @@ fn run_capture(tx: Sender<Captured>, swallow: Arc<AtomicBool>, ready: Sender<Res
             let _ = ready.send(Err(WinError::WindowFailed));
             return;
         }
+        // HID usage page 1 (Generic Desktop), usage 2 (Mouse). `RIDEV_INPUTSINK`
+        // delivers input even though this window never has focus.
         let device = RAWINPUTDEVICE {
             usUsagePage: 0x01,
             usUsage: 0x02,
@@ -395,11 +459,17 @@ fn run_capture(tx: Sender<Captured>, swallow: Arc<AtomicBool>, ready: Sender<Res
 
 /// Posts input that apps cannot tell apart from a real keyboard and mouse.
 pub struct Injector {
+    /// Overdesk codes this injector has pressed and not yet released.
     keys: Vec<u32>,
+    /// Buttons this injector has pressed and not yet released.
     buttons: Vec<Button>,
+    /// Primary display size in pixels, captured at creation, for absolute coordinates.
     size: (u32, u32),
 }
 
+/// Builds one `SendInput` mouse record tagged with [`INJECTED_TAG`]. `dx`/`dy` are
+/// absolute (0..=65535) or relative depending on `flags`; `data` is the X button
+/// number or the wheel delta.
 fn mouse_input(dx: i32, dy: i32, data: u32, flags: u32) -> INPUT {
     INPUT {
         r#type: INPUT_MOUSE,
@@ -416,6 +486,9 @@ fn mouse_input(dx: i32, dy: i32, data: u32, flags: u32) -> INPUT {
     }
 }
 
+/// Injects `inputs` in one `SendInput` call, so Windows keeps them together and in
+/// order. The return count is ignored: a blocked injection (for example into an
+/// elevated window, under UIPI) cannot be retried usefully.
 fn send_inputs(inputs: &[INPUT]) {
     // SAFETY: `inputs` is a valid slice of INPUT structs for the duration of the call.
     unsafe {
@@ -428,6 +501,8 @@ fn send_inputs(inputs: &[INPUT]) {
 }
 
 impl Injector {
+    /// Creates an injector for the primary display. Never fails on Windows; the
+    /// `Result` matches the macOS adapter.
     pub fn new() -> Result<Self, WinError> {
         Ok(Self {
             keys: Vec::new(),
@@ -450,6 +525,8 @@ impl Injector {
         send_inputs(&[mouse_input(ax, ay, 0, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE)]);
     }
 
+    /// Presses or releases `button` at the current cursor position, tracking it so
+    /// [`Injector::release_all`] can release it later.
     pub fn button(&mut self, button: Button, pressed: bool) {
         let (flags, data) = match (button, pressed) {
             (Button::Left, true) => (MOUSEEVENTF_LEFTDOWN, 0),
@@ -476,6 +553,8 @@ impl Injector {
         if pressed {
             self.keys.push(code);
         }
+        // Inject the scan code rather than a virtual key, so the active layout maps it
+        // exactly as it would a physical key; the `0xE0` prefix becomes a flag.
         let mut flags = KEYEVENTF_SCANCODE;
         if scan & 0xE000 == 0xE000 {
             flags |= KEYEVENTF_EXTENDEDKEY;
@@ -503,6 +582,7 @@ impl Injector {
     pub fn scroll(&mut self, dx: i32, dy: i32, unit: ScrollUnit, _phase: Phase) {
         let mut inputs = Vec::with_capacity(2);
         if dy != 0 {
+            // `mouseData` is a DWORD, but Windows reads the wheel delta as signed.
             inputs.push(mouse_input(0, 0, wheel_units(dy, unit) as u32, MOUSEEVENTF_WHEEL));
         }
         if dx != 0 {

@@ -20,10 +20,13 @@ use overdesk_proto::{Control, Desk, DeskScreen, Os, PeerId};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::task::JoinHandle;
 
+/// Why a connection could not become a running session.
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonError {
+    /// The secure link, the trust check or the `Hello` exchange failed.
     #[error(transparent)]
     Session(#[from] SessionError),
+    /// The Desk the dialer sent was missing, malformed or could not be adopted.
     #[error("peer did not send a valid Desk: {0}")]
     BadDesk(String),
 }
@@ -31,24 +34,36 @@ pub enum DaemonError {
 /// Where the peer's screen sits relative to ours (the dialer decides).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
+    /// The peer's screen sits to the left of this device's screen.
     Left,
+    /// The peer's screen sits to the right of this device's screen.
     Right,
 }
 
 /// A trusted, introduced peer with a shared Desk, ready to run.
 pub struct Session {
+    /// The cursor-routing engine for this device, built from the agreed Desk.
     pub engine: Engine,
+    /// The sending half of the link: control messages and motion datagrams.
     pub tx: LinkTx,
+    /// The receiving half of the link, read by the session's helper tasks.
     pub rx: LinkRx,
+    /// This device's id, derived from its certificate fingerprint.
     pub me: PeerId,
+    /// The peer's id, as it introduced itself in `Hello`.
     pub peer: PeerId,
+    /// The peer's human-readable device name, shown in the UI.
     pub peer_name: String,
+    /// The peer's operating system, which decides how keys are translated.
     pub peer_os: Os,
+    /// The shared Desk both devices agreed on for this session.
     pub desk: Desk,
 }
 
 /// What the OS adapter must do for the engine.
 pub trait Platform: Send + 'static {
+    /// Turns swallowing on or off: while on, local input drives the peer and must not
+    /// also reach this device.
     fn swallow(&self, on: bool);
     /// Performs `Inject*` and `ReleaseAll` actions.
     fn inject(&self, action: Action);
@@ -91,6 +106,7 @@ pub async fn establish(
     };
     let desk = match link.role() {
         Role::Dialer => {
+            // The dialer's screen sits at x = 0; the peer's goes beside it on the chosen side.
             let peer_x = match side {
                 Side::Right => me.width as i32,
                 Side::Left => -(width as i32),
@@ -112,11 +128,13 @@ pub async fn establish(
             let Control::Desk(incoming) = link.recv_control().await.map_err(SessionError::from)? else {
                 return Err(DaemonError::BadDesk("expected Desk".into()));
             };
+            // Nothing has been adopted yet, so any valid Desk from the dialer counts as newer.
             let empty = Desk {
                 version: 0,
                 author: PeerId([0; 16]),
                 screens: vec![],
             };
+            // Only this device and the introduced peer may own a screen in the incoming Desk.
             adopt(&empty, incoming, peer, |p| *p == mine || *p == peer)
                 .map_err(|e| DaemonError::BadDesk(format!("{e:?}")))?
                 .ok_or_else(|| DaemonError::BadDesk("not newer".into()))?
@@ -137,6 +155,7 @@ pub async fn establish(
     })
 }
 
+/// Formats a peer id as lowercase hex, used as a stable, collision-free screen name.
 fn hex(p: &PeerId) -> String {
     p.0.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -166,6 +185,7 @@ pub async fn run(
         peer,
         ..
     } = session;
+    // Every source feeds one queue, so the engine sees all events in a single order.
     let (events, mut queue) = unbounded_channel::<Event>();
     let motion = rx.motion();
     let (control_ev, motion_ev, local_ev) = (events.clone(), events.clone(), events);
@@ -176,6 +196,7 @@ pub async fn run(
                     Ok(msg) => Event::Peer { from: peer, msg },
                     Err(_) => Event::PeerLost(peer),
                 };
+                // After a loss there is nothing more to read; the engine needs `PeerLost` only once.
                 let lost = matches!(event, Event::PeerLost(_));
                 if control_ev.send(event).is_err() || lost {
                     break;
@@ -200,6 +221,8 @@ pub async fn run(
     let epoch = Instant::now();
     let debug = std::env::var_os("OVERDESK_DEBUG").is_some();
     while let Some(event) = queue.recv().await {
+        // Note the loss now: the engine consumes the event, and its cleanup actions must
+        // still run before the loop stops.
         let lost = event == Event::PeerLost(peer);
         if debug {
             eprintln!("[debug] {:?} <- {event:?}", engine.mode());
@@ -221,6 +244,7 @@ pub async fn run(
                     }
                 }
                 Action::SendMotion { motion, .. } => {
+                    // Motion travels as datagrams and is best-effort: the next sample supersedes a lost one.
                     let _ = tx.send_motion(&motion);
                 }
                 Action::Swallow(on) => platform.swallow(on),

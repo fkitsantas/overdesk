@@ -9,7 +9,12 @@
 use overdesk_proto::{Pairing, PeerId};
 use ring::digest::{SHA256, digest};
 
+/// SHA-256 of a device certificate's DER encoding. This is the value that is pinned
+/// after pairing and compared on every later connection; anyone holding the matching
+/// private key is treated as that device.
 pub type Fingerprint = [u8; 32];
+/// 32 random bytes contributed by one side to a single pairing attempt. Must come from
+/// a cryptographically secure RNG and must never be reused across attempts.
 pub type Nonce = [u8; 32];
 
 /// SHA-256 of a certificate's DER bytes.
@@ -17,6 +22,8 @@ pub fn fingerprint(cert_der: &[u8]) -> Fingerprint {
     sha256(&[cert_der])
 }
 
+/// SHA-256 over the concatenation of `parts`. Callers only pass a fixed-length domain
+/// tag followed by fixed-length fields, so concatenation is unambiguous.
 fn sha256(parts: &[&[u8]]) -> [u8; 32] {
     let bytes = parts.concat();
     digest(&SHA256, &bytes)
@@ -47,6 +54,8 @@ pub fn code(dialer_nonce: &Nonce, listener_nonce: &Nonce, dialer_fp: &Fingerprin
     u32::from_be_bytes([h[0], h[1], h[2], h[3]]) % 1_000_000
 }
 
+/// Protocol violations detected by the pairing state machines. Either one aborts the
+/// attempt; neither reveals anything secret to the peer.
 #[derive(Debug, PartialEq, Eq)]
 pub enum PairError {
     /// Message arrived out of order or from the wrong role.
@@ -58,21 +67,33 @@ pub enum PairError {
 /// What the caller does next.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Step {
+    /// Send the message to the peer and wait for its reply.
     Send(Pairing),
     /// Send the message, then show the code to the user.
     SendAndShow(Pairing, u32),
+    /// Show the code to the user; the exchange is complete on this side.
     Show(u32),
 }
 
 /// The side that opened the connection.
+///
+/// It commits to its nonce first and reveals it only after receiving the listener's,
+/// so it cannot choose its nonce to steer the code.
 pub struct Dialer {
+    /// This side's secret nonce, hidden behind the commitment until the reveal.
     nonce: Nonce,
+    /// This device's certificate fingerprint, as seen on this connection.
     dialer_fp: Fingerprint,
+    /// The peer's certificate fingerprint, as seen on this connection.
     listener_fp: Fingerprint,
+    /// Set once the reveal has been produced; any later message is unexpected.
     done: bool,
 }
 
 impl Dialer {
+    /// Starts an attempt and returns the state machine together with the `Commit`
+    /// message to send first.
+    ///
     /// `nonce` must be fresh random bytes for every attempt.
     pub fn new(nonce: Nonce, dialer_fp: Fingerprint, listener_fp: Fingerprint) -> (Self, Pairing) {
         let commit = Pairing::Commit {
@@ -89,6 +110,12 @@ impl Dialer {
         )
     }
 
+    /// Handles the listener's `Nonce`, returning the `Reveal` to send and the code to
+    /// show.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PairError::Unexpected`] for any other message, or for a second `Nonce`.
     pub fn on_message(&mut self, msg: &Pairing) -> Result<Step, PairError> {
         match msg {
             Pairing::Nonce { nonce: theirs } if !self.done => {
@@ -102,15 +129,26 @@ impl Dialer {
 }
 
 /// The side that accepted the connection.
+///
+/// It sends its nonce only after it holds the dialer's commitment, and checks the
+/// reveal against that commitment before producing a code.
 pub struct Listener {
+    /// This side's nonce; sent in the clear once the commitment has arrived.
     nonce: Nonce,
+    /// The peer's certificate fingerprint, as seen on this connection.
     dialer_fp: Fingerprint,
+    /// This device's certificate fingerprint, as seen on this connection.
     listener_fp: Fingerprint,
+    /// The dialer's commitment, once received; `None` until then.
     commit: Option<[u8; 32]>,
+    /// Set once a reveal has been processed, whether it matched or not, so a failed
+    /// reveal cannot be retried on the same attempt.
     done: bool,
 }
 
 impl Listener {
+    /// Starts an attempt that waits for the dialer's `Commit`.
+    ///
     /// `nonce` must be fresh random bytes for every attempt.
     pub fn new(nonce: Nonce, dialer_fp: Fingerprint, listener_fp: Fingerprint) -> Self {
         Self {
@@ -122,6 +160,14 @@ impl Listener {
         }
     }
 
+    /// Handles the dialer's `Commit` (answered with our `Nonce`) and then its `Reveal`
+    /// (answered with the code to show).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PairError::BadReveal`] if the revealed nonce does not open the
+    /// commitment, and [`PairError::Unexpected`] for any message out of order or
+    /// repeated.
     pub fn on_message(&mut self, msg: &Pairing) -> Result<Step, PairError> {
         match (msg, self.commit) {
             (Pairing::Commit { digest }, None) => {
@@ -129,6 +175,7 @@ impl Listener {
                 Ok(Step::Send(Pairing::Nonce { nonce: self.nonce }))
             }
             (Pairing::Reveal { nonce: theirs }, Some(committed)) if !self.done => {
+                // Marked done before the check, so a bad reveal ends the attempt for good.
                 self.done = true;
                 // Not constant-time: the commitment is public, so timing leaks nothing secret.
                 if commitment(theirs, &self.dialer_fp) != committed {

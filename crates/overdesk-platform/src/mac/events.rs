@@ -7,22 +7,37 @@ use overdesk_proto::{Button, PAGE_APPLE_TOP_CASE, Phase};
 use super::keymap::vk_to_code;
 
 // Generic CGEventFlags.
+/// `kCGEventFlagMaskShift`: set while either Shift key is down.
 pub const FLAG_SHIFT: u64 = 0x0002_0000;
+/// `kCGEventFlagMaskControl`: set while either Control key is down.
 pub const FLAG_CONTROL: u64 = 0x0004_0000;
+/// `kCGEventFlagMaskAlternate`: set while either Option key is down.
 pub const FLAG_OPTION: u64 = 0x0008_0000;
+/// `kCGEventFlagMaskCommand`: set while either Command key is down.
 pub const FLAG_COMMAND: u64 = 0x0010_0000;
+/// `kCGEventFlagMaskSecondaryFn`: set while the Fn/Globe key is down.
 pub const FLAG_FN: u64 = 0x0080_0000;
 // Device-dependent bits (NX_DEVICE*KEYMASK): tell left from right.
+/// `NX_DEVICELCTLKEYMASK`: the left Control key is down.
 pub const DEV_LCTL: u64 = 0x0001;
+/// `NX_DEVICELSHIFTKEYMASK`: the left Shift key is down.
 pub const DEV_LSHIFT: u64 = 0x0002;
+/// `NX_DEVICERSHIFTKEYMASK`: the right Shift key is down.
 pub const DEV_RSHIFT: u64 = 0x0004;
+/// `NX_DEVICELCMDKEYMASK`: the left Command key is down.
 pub const DEV_LCMD: u64 = 0x0008;
+/// `NX_DEVICERCMDKEYMASK`: the right Command key is down.
 pub const DEV_RCMD: u64 = 0x0010;
+/// `NX_DEVICELALTKEYMASK`: the left Option key is down.
 pub const DEV_LALT: u64 = 0x0020;
+/// `NX_DEVICERALTKEYMASK`: the right Option key is down.
 pub const DEV_RALT: u64 = 0x0040;
+/// `NX_DEVICERCTLKEYMASK`: the right Control key is down.
 pub const DEV_RCTL: u64 = 0x2000;
 
+/// Overdesk code (HID keyboard-page usage) of Caps Lock.
 const CODE_CAPS: u32 = 0x39;
+/// Overdesk code of the Fn/Globe key: usage 0x03 on Apple's vendor "top case" page.
 const CODE_FN: u32 = PAGE_APPLE_TOP_CASE | 0x03;
 
 /// `(overdesk code, bits that mean "this exact key is down", generic flag)`.
@@ -42,7 +57,9 @@ const MODIFIERS: &[(u32, u64, u64)] = &[
 /// A modifier transition decoded from a `kCGEventFlagsChanged` event.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ModChange {
+    /// The modifier with this Overdesk code went down.
     Press(u32),
+    /// The modifier with this Overdesk code came up.
     Release(u32),
     /// Caps Lock reports lock state, not key state; forward as press + release.
     Toggle(u32),
@@ -52,9 +69,13 @@ pub enum ModChange {
 /// only `flagsChanged` with the key's `kVK` and the new flag word.
 pub fn modifier_change(vk: u16, flags: u64) -> Option<ModChange> {
     let code = vk_to_code(vk)?;
+    // Caps Lock's flag bit is the lock state, so it cannot say whether the key went
+    // down or up; every flagsChanged for it is treated as one full tap.
     if code == CODE_CAPS {
         return Some(ModChange::Toggle(code));
     }
+    // Only the device-dependent (side) bit is checked: the generic flag stays set
+    // while the other side's key is still held.
     let &(_, down_bit, _) = MODIFIERS.iter().find(|m| m.0 == code)?;
     Some(if flags & down_bit != 0 {
         ModChange::Press(code)
@@ -106,12 +127,19 @@ pub fn phase_to_cg(p: Phase) -> (i64, i64) {
 /// (text selection, window moves) when the move is typed as a drag.
 #[derive(Debug, PartialEq, Eq)]
 pub enum MoveKind {
+    /// `kCGEventMouseMoved`: no button is held.
     Moved,
+    /// `kCGEventLeftMouseDragged`: the left button is held.
     LeftDragged,
+    /// `kCGEventRightMouseDragged`: the right button is held, but not the left.
     RightDragged,
+    /// `kCGEventOtherMouseDragged`: only middle, back or forward buttons are held.
     OtherDragged,
 }
 
+/// Picks the Quartz move type for an injected pointer move from the buttons currently
+/// held by the injector. The left button wins over the right, and the right over any
+/// other, matching how macOS types real drags with several buttons down.
 pub fn move_kind(held: &[Button]) -> MoveKind {
     if held.contains(&Button::Left) {
         MoveKind::LeftDragged
@@ -131,11 +159,18 @@ pub const CLICK_SLOP: i32 = 4;
 /// double-click: Finder will not open files and text will not select words.
 #[derive(Debug, Default)]
 pub struct ClickCounter {
+    /// The previous press as `(button, time in ms, x, y, click count)`, or `None`
+    /// before the first press.
     last: Option<(Button, u64, i32, i32, i64)>,
 }
 
 impl ClickCounter {
     /// Records a press at `t_ms`; returns its click count (1 = single, 2 = double, ...).
+    ///
+    /// A press continues the previous multi-click when it is the same button, comes
+    /// within `interval_ms` of the previous press and lands within [`CLICK_SLOP`] points
+    /// of it on both axes; otherwise the count restarts at 1. Positions are in global
+    /// display points.
     pub fn press(&mut self, button: Button, t_ms: u64, x: i32, y: i32, interval_ms: u64) -> i64 {
         let count = match self.last {
             Some((b, t, lx, ly, n))
@@ -153,6 +188,9 @@ impl ClickCounter {
     }
 }
 
+/// Press/release bookkeeping, re-exported next to the other event helpers. It is
+/// platform-neutral and lives in [`crate::input`]; the Windows adapter imports it from
+/// here too.
 pub use crate::input::{Held, LocalDowns};
 
 /// Carries fractional mouse deltas between events so slow, precise trackpad and
@@ -160,15 +198,22 @@ pub use crate::input::{Held, LocalDowns};
 #[derive(Debug, Default)]
 pub struct Subpixel {
     // Fixed point in 1/1024 px: float remainders drift (0.2 - 1.2 != -1.0).
+    /// Horizontal remainder not yet emitted, in 1/1024 px; always `-1024 < rx < 1024`.
     rx: i64,
+    /// Vertical remainder not yet emitted, in 1/1024 px; always `-1024 < ry < 1024`.
     ry: i64,
 }
 
 impl Subpixel {
+    /// Adds one event's fractional delta (points) and returns the whole points that are
+    /// now due, keeping the fractional rest for the next call.
     pub fn feed(&mut self, dx: f64, dy: f64) -> (i32, i32) {
+        /// One whole point in the fixed-point scale.
         const ONE: i64 = 1024;
         self.rx += (dx * ONE as f64).round() as i64;
         self.ry += (dy * ONE as f64).round() as i64;
+        // Integer division and `%` both truncate towards zero, so the remainder keeps
+        // the sign of the motion and negative moves round the same way as positive ones.
         let (ix, iy) = (self.rx / ONE, self.ry / ONE);
         self.rx %= ONE;
         self.ry %= ONE;

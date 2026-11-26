@@ -17,14 +17,21 @@ use crate::Platform;
 /// Captured input goes to whichever session asked for it last.
 type Slot = Arc<Mutex<Option<UnboundedSender<Captured>>>>;
 
+/// The [`Platform`] for macOS and Windows: real input capture and injection.
+/// Cloning is cheap; every clone shares the same capture tap and injector thread.
 #[derive(Clone)]
 pub struct NativePlatform {
+    /// The OS capture tap, shared so swallowing can be switched from any clone.
     capture: Arc<Capture>,
+    /// Sends actions to the injector thread.
     inject: Sender<Action>,
+    /// The session that currently receives captured input.
     slot: Slot,
 }
 
 impl NativePlatform {
+    /// Starts capture and the injector thread. Fails if the OS refuses either, for
+    /// example when a permission is missing.
     pub fn start() -> Result<Self, String> {
         let (capture, events) = Capture::start().map_err(|e| format!("capture: {e:?}"))?;
         let slot: Slot = Arc::default();
@@ -32,6 +39,7 @@ impl NativePlatform {
         std::thread::Builder::new()
             .name("overdesk-capture-bridge".into())
             .spawn(move || {
+                // Forward to the current session; with no session, captured input is dropped.
                 while let Ok(c) = events.recv() {
                     if let Some(tx) = bridge.lock().expect("slot lock").as_ref() {
                         let _ = tx.send(c);
@@ -69,6 +77,7 @@ impl NativePlatform {
                 }
             })
             .map_err(|e| e.to_string())?;
+        // Wait for the injector: start() fails rather than inject into nothing.
         ready.recv().map_err(|e| e.to_string())??;
         Ok(Self {
             capture: Arc::new(capture),

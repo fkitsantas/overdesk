@@ -144,18 +144,27 @@ const MEDIA: &[(u32, u32)] = &[
 ];
 
 // Linear scans: ~120 entries, called once per key event; cheaper than building a map.
+/// Translates a macOS virtual key code (`kVK_*`, as found in the
+/// `kCGKeyboardEventKeycode` field) to its Overdesk code, or `None` for keys Overdesk
+/// does not map.
 pub fn vk_to_code(vk: u16) -> Option<u32> {
     KEYS.iter().find(|k| k.0 == vk).map(|k| k.1)
 }
 
+/// Translates an Overdesk code to the macOS virtual key code used to post it with
+/// `CGEventCreateKeyboardEvent`, or `None` when the Mac has no such key.
 pub fn code_to_vk(code: u32) -> Option<u16> {
     KEYS.iter().find(|k| k.1 == code).map(|k| k.0)
 }
 
+/// Translates an `NX_KEYTYPE_*` media key (from an `NSSystemDefined` event) to its
+/// Overdesk consumer-page code, or `None` for unmapped media keys.
 pub fn nx_to_code(nx: u32) -> Option<u32> {
     MEDIA.iter().find(|k| k.0 == nx).map(|k| k.1)
 }
 
+/// Translates an Overdesk code to the `NX_KEYTYPE_*` media key that posts it, or
+/// `None` when it is not a media key macOS can generate.
 pub fn code_to_nx(code: u32) -> Option<u32> {
     MEDIA.iter().find(|k| k.1 == code).map(|k| k.0)
 }

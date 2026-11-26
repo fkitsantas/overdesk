@@ -16,14 +16,21 @@ async fn within<T>(f: impl Future<Output = T>) -> T {
         .expect("timed out")
 }
 
+/// Two connected links over loopback, with the identities behind them.
 struct Pair {
+    /// The side that dialed.
     dialer: Link,
+    /// The side that accepted.
     listener: Link,
+    /// The dialer's identity, for checking fingerprints.
     dialer_id: Identity,
+    /// The listener's identity, for checking fingerprints.
     listener_id: Identity,
+    /// Keeps both endpoints alive; dropping a node would close its links.
     _nodes: (Node, Node),
 }
 
+/// Binds two nodes on ephemeral ports and connects them. Neither link is trusted yet.
 async fn connected() -> Pair {
     let (dialer_id, listener_id) = (Identity::generate().unwrap(), Identity::generate().unwrap());
     let a = Node::bind(&dialer_id, "127.0.0.1:0".parse().unwrap()).unwrap();
@@ -48,6 +55,7 @@ async fn trusted() -> Pair {
     p
 }
 
+/// A `Me` with the given name and fixed placeholder OS and screen size.
 fn me(name: &str) -> Me {
     Me {
         name: name.into(),

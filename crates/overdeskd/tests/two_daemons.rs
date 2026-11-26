@@ -11,6 +11,8 @@ use overdesk_platform::input::Captured;
 use overdesk_proto::Os;
 use overdeskd::{Platform, Side, establish, run};
 
+/// A platform that records every injected action and the swallow flag, so tests can
+/// assert what a session did.
 #[derive(Clone, Default)]
 struct Fake {
     log: Arc<Mutex<Vec<Action>>>,
@@ -26,6 +28,7 @@ impl Platform for Fake {
     }
 }
 
+/// Polls `cond` every 25 ms for up to five seconds; panics with `what` on timeout.
 async fn wait_for(what: &str, cond: impl Fn() -> bool) {
     for _ in 0..200 {
         if cond() {

@@ -8,8 +8,11 @@ use std::time::{Duration, Instant};
 use overdesk_net::transport::{Identity, Node};
 use overdesk_proto::Motion;
 
+/// Number of round trips to measure.
 const SAMPLES: usize = 2000;
 
+/// Connects two nodes over loopback, echoes motion datagrams from one to the other,
+/// and prints the p50, p99 and maximum round-trip times and the number of samples lost.
 #[tokio::main]
 async fn main() {
     let (a_id, b_id) = (Identity::generate().unwrap(), Identity::generate().unwrap());
@@ -33,6 +36,8 @@ async fn main() {
     for seq in 0..SAMPLES as u32 {
         let start = Instant::now();
         dialer.send_motion(&Motion { seq, x: 1, y: 1 }).unwrap();
+        // A sample not back within 100 ms counts as lost, as does a late echo of an
+        // earlier one.
         match tokio::time::timeout(Duration::from_millis(100), dialer.recv_motion()).await {
             Ok(Ok(m)) if m.seq == seq => rtts.push(start.elapsed()),
             _ => lost += 1,
