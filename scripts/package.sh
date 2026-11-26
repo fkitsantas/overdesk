@@ -23,7 +23,7 @@ export OVERDESK_VERSION="$VERSION"
 cargo build --release -p overdesk-app
 cd crates/overdesk-app
 # Version comes from Cargo (workspace-inherited). Config is passed as raw JSON: cargo-packager 0.11.8 fails to load config *files* (it chdirs into the file path).
-case "$(uname -s)" in Darwin) FORMATS=app,dmg;; *) FORMATS=nsis;; esac
+case "$(uname -s)" in Darwin) FORMATS=app,dmg;; Linux) FORMATS=appimage,deb;; *) FORMATS=nsis;; esac
 cargo packager --release -f "$FORMATS" -c "$(sed "s/^{/{\"version\":\"$VERSION\",/" packager.json)"
 # The updater only accepts an artifact whose *signed* file name carries a version strictly
 # newer than the running app (protection against downgrade attacks; see
@@ -36,6 +36,20 @@ if [ "$(uname -s)" = Darwin ] && [ -f ../../target/packages/Overdesk.app.tar.gz 
   rm -f ../../target/packages/Overdesk.app.tar.gz.sig
   if [ -n "${CARGO_PACKAGER_SIGN_PRIVATE_KEY:-}" ]; then
     cargo packager signer sign "$VERSIONED"
+  fi
+fi
+# Linux: cargo-packager names the update tarball Overdesk_<v>_<amd64|arm64>.AppImage.tar.gz;
+# rename to the x86_64/aarch64 naming used by the manifest and sign under that name.
+if [ "$(uname -s)" = Linux ]; then
+  ARCH=$(uname -m | sed 's/arm64/aarch64/')
+  VERSIONED="../../target/packages/Overdesk_${VERSION}_${ARCH}.AppImage.tar.gz"
+  BUILT=$(ls ../../target/packages/Overdesk_"${VERSION}"_*.AppImage.tar.gz 2>/dev/null | head -n 1 || true)
+  if [ -n "$BUILT" ]; then
+    [ "$BUILT" = "$VERSIONED" ] || mv "$BUILT" "$VERSIONED"
+    rm -f "$BUILT.sig" "$VERSIONED.sig"
+    if [ -n "${CARGO_PACKAGER_SIGN_PRIVATE_KEY:-}" ]; then
+      cargo packager signer sign "$VERSIONED"
+    fi
   fi
 fi
 echo "Packages in: $(cd ../.. && pwd)/target/packages"

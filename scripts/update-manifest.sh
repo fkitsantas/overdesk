@@ -9,11 +9,15 @@ OUT=${1:?out dir}; BASE=${2:?artifact base url, e.g. https://overdesk.org/update
 VERSION=${OVERDESK_VERSION:-$(cargo pkgid -p overdesk-app | sed 's/.*[#@]//')}
 case "$(uname -s)" in
   Darwin) TARGET=macos; FORMAT=app; ART="";; # versioned name set once ARCH is known
+  Linux) TARGET=linux; FORMAT=appimage; ART="";; # versioned name set once ARCH is known
   *) TARGET=windows; FORMAT=nsis; ART=$(cd target/packages && ls Overdesk_"${VERSION}"_*-setup.exe);;
 esac
 case "$(uname -m)" in arm64|aarch64) ARCH=aarch64;; *) ARCH=x86_64;; esac
-# package.sh signs the macOS archive under its versioned name; publish it under that same name.
-[ -z "$ART" ] && ART="Overdesk_${VERSION}_${ARCH}.app.tar.gz"
+# package.sh signs the macOS/Linux archive under its versioned name; publish it under that same name.
+if [ -z "$ART" ]; then
+  EXT=app.tar.gz; [ "$TARGET" = linux ] && EXT=AppImage.tar.gz
+  ART="Overdesk_${VERSION}_${ARCH}.$EXT"
+fi
 SRC=target/packages/$ART
 [ -f "$SRC.sig" ] || { echo "missing $SRC.sig: package with the signing key first" >&2; exit 1; }
 DEST="$OUT/$TARGET/$ARCH"; mkdir -p "$DEST"

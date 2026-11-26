@@ -1,6 +1,6 @@
 # Releasing
 
-Each release is a signed build that installed apps pick up by themselves. Run this on each OS you ship (macOS and Windows builds cannot be cross-made).
+Each release is a signed build that installed apps pick up by themselves. Run this on each OS you ship (macOS, Windows and Linux builds cannot be cross-made).
 
 ## One-time setup
 
@@ -15,7 +15,7 @@ Each release is a signed build that installed apps pick up by themselves. Run th
 ## Cutting a release
 
 1. Bump `version` in the workspace `Cargo.toml`; commit and tag.
-2. `scripts/package.sh` builds, packages and signs into `target/packages/` (`Overdesk_<v>_<arch>.app.tar.gz` + `.sig` on macOS, renamed before signing so the signed file name carries the version, which the app requires to refuse downgrades; `Overdesk_<v>_<arch>-setup.exe` + `.sig` on Windows; the `.dmg` is for first installs).
+2. `scripts/package.sh` builds, packages and signs into `target/packages/` (`Overdesk_<v>_<arch>.app.tar.gz` + `.sig` on macOS, renamed before signing so the signed file name carries the version, which the app requires to refuse downgrades; `Overdesk_<v>_<arch>.AppImage.tar.gz` + `.sig` on Linux (also renamed before signing; `.deb` and `.AppImage` are for first installs); `Overdesk_<v>_<arch>-setup.exe` + `.sig` on Windows; the `.dmg` is for first installs).
 3. `scripts/update-manifest.sh <out-dir> https://overdesk.org/updates/files` writes `<out-dir>/<target>/<arch>/latest.json` and copies the artifact and `.sig` next to it.
 4. Upload `<out-dir>` so the artifact URLs in `latest.json` resolve. Upload the installer (`.dmg` / `-setup.exe`) for new users.
 5. Make `https://overdesk.org/updates/<target>/<arch>/<current_version>` answer with that `latest.json` for every older version (a server rewrite of `/updates/:target/:arch/:version` to `latest.json` is simplest). Apps already on the latest version compare equal and do nothing. Answering 204 is also fine.
