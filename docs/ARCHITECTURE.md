@@ -72,7 +72,7 @@ Apple fidelity lives in the macOS adapter. The wire format never throws that inf
 
 ```mermaid
 flowchart TB
-    UI["apps/desktop<br/>Tauri 2 + Svelte 5"] --> CORE
+    UI["overdesk-app<br/>iced, pure Rust"] --> CORE
     D["overdesk daemon"] --> CORE
     CORE["overdesk-core<br/>pure logic: layout · switch · remap · held keys"] --> PROTO["overdesk-proto<br/>wire types"]
     CORE -. trait .- PLAT["overdesk-platform<br/>macOS · Windows · Linux adapters"]
@@ -157,10 +157,10 @@ managed corporate laptops.
 
 | OS | Installer | Location |
 |---|---|---|
-| Windows | Per-user NSIS installer (Tauri `installMode: currentUser`) | `%LOCALAPPDATA%\Programs\Overdesk` |
+| Windows | Per-user NSIS installer (cargo-packager, `currentUser` install mode) | `%LOCALAPPDATA%\Programs\Overdesk` |
 | macOS | `.pkg` with "Install for me only" (`enable_currentUserHome`) | `~/Applications/Overdesk.app` |
 
-**Update flow** (Tauri 2 updater plugin):
+**Update flow** (`cargo-packager-updater`, pure Rust):
 1. Check `https://overdesk.org/updates/{os}/{arch}/{channel}.json` over HTTPS.
 2. Download the new bundle. Verify its **Ed25519 signature** against the public key built
    into the app, and reject it if verification fails. The private key never leaves the

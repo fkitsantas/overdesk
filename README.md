@@ -91,7 +91,7 @@ costs nothing until you use it.
 | 3b | `overdeskd` daemon: Desk engine, saved pairings, failsafe escape chord. Hand-tested on a Mac ([evidence](docs/tdd/daemon.tdd.md)) | ✅ Done |
 | 3c | LAN discovery (no typing IP addresses) | 🔜 |
 | 4 | **Windows** capture and injection | 🔜 |
-| 5 | Desktop app: Tauri 2 + Svelte 5, drag-to-arrange screens, tray icon | 🔜 |
+| 5 | Desktop app in pure Rust (iced): Desk map, pairing, menu-bar / tray icon | ⏳ In progress |
 | 6 | Linux (X11, then Wayland through libei) | 🔜 |
 | 7 | Signed per-user installers and **self-updates without admin rights** (built for managed corporate laptops), plus Overdesk Pro license keys | 🔜 |
 | 8 | Android TV client (Pro) | 🔭 Stretch |
