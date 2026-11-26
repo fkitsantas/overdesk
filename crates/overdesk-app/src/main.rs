@@ -54,6 +54,7 @@ static STATE: OnceLock<watch::Receiver<AppState>> = OnceLock::new();
 /// Opens the window: Inter as the default font, the brand theme, and the controller's
 /// state as a subscription.
 fn main() -> iced::Result {
+    update::startup(); // may roll back a failed update and relaunch
     iced::application(App::boot, App::update, App::view)
         .title("Overdesk")
         .subscription(App::subscription)
@@ -152,6 +153,8 @@ struct App {
 enum Message {
     /// The controller started, or failed to.
     Started(Result<(mpsc::UnboundedSender<Command>, AppState), String>),
+    /// The controller has been up long enough to call a fresh update healthy.
+    Healthy,
     /// The controller published a new state.
     State(AppState),
     /// The system switched between light and dark.
@@ -297,7 +300,9 @@ impl App {
         match message {
             Message::Started(Ok((commands, state))) => {
                 self.screen = Screen::Running { commands, state };
+                return Task::perform(update::confirm_healthy(), |()| Message::Healthy);
             }
+            Message::Healthy => {}
             Message::Started(Err(e)) => self.screen = Screen::Failed(e),
             Message::State(new) => {
                 if !matches!(new.phase, Phase::Pairing { .. }) {

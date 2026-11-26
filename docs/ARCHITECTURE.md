@@ -169,6 +169,15 @@ managed corporate laptops.
 3. Replace the app in its per-user location, then restart: at the next idle moment, never
    while you're driving another device.
 4. Keep the previous version, and roll back automatically if the new one fails to start.
+   **macOS:** before installing, the current bundle is copied to
+   `~/Library/Application Support/Overdesk/previous/` and a `pending-update` marker is
+   written. The new version confirms itself once the controller has been up for 10 seconds,
+   which deletes the marker and the copy. If it is started a third time without confirming
+   (it crashed or was killed twice), the copy is restored over the install, the app
+   relaunches, and the failed version goes into `bad-updates`, which the update check
+   skips. Only the exact marked version is ever rolled back. **Windows:** not yet. The NSIS
+   installer replaces the folder while the app is locked, so a restore needs a separate
+   per-user helper; until then a bad update is fixed by shipping a newer one.
 
 **For IT departments:**
 - **Code signing:** Authenticode on Windows, Developer ID with notarization on macOS. IT
