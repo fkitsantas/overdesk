@@ -92,7 +92,7 @@ private never leave the computer. Images and files come with Pro.
 | 3c | LAN discovery over mDNS: nearby computers appear by name, no IP addresses | ✅ Built and hand-tested |
 | 4 | **Windows** capture and injection (low-level hooks, Raw Input, `SendInput`) | 🧪 Built; real-PC test pending |
 | 5 | Desktop app in pure Rust (iced): Desk map, pairing, menu-bar / tray icon, light and dark | ✅ Built and hand-tested on a Mac |
-| 6 | **Linux**: X11 (XInput2 capture, XTest injection), then Wayland through the desktop portals (libei) | 🧪 X11 built (tested on a virtual display); app, tray, AppImage and .deb built; real-desktop test pending. Wayland designed ([docs/WAYLAND.md](docs/WAYLAND.md)) 🔜 |
+| 6 | **Linux**: X11 (XInput2 capture, XTest injection) and Wayland through the desktop portals (InputCapture, RemoteDesktop), picked at run time | 🧪 Both built; X11 tested on a virtual display, Wayland unit-tested; app, tray, AppImage and .deb built. Real-desktop test pending ([docs/WAYLAND.md](docs/WAYLAND.md)) |
 | 7 | Per-user installers, **signed self-updates without admin rights** (built for managed corporate laptops) with automatic rollback of an update that fails to start (macOS), device keys in Keychain / DPAPI, Overdesk Pro license keys | 🧪 Built; install-and-update test pending. Developer ID / Authenticode signing 🔜 |
 | 8 | Android TV client (Pro) | 🔭 Stretch |
 
