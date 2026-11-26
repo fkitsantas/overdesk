@@ -136,7 +136,7 @@ Measure motion-lane latency over loopback QUIC:
 
 ```bash
 cargo run --release -p overdesk-net --example latency
-# motion round trip over loopback, 2000 samples: p50 256µs  p99 804µs  lost 0   (M-series Mac)
+# motion round trip over loopback, 2000 samples: p50 256µs  p99 804µs  lost 0   (measured on a Mac, release build)
 ```
 
 ## Contributing
