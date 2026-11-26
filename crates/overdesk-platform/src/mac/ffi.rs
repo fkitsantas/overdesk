@@ -45,6 +45,13 @@ pub enum MacError {
     SourceCreateFailed,
 }
 
+/// Main display size in points.
+/// shortcut: main display only; multi-display Macs need per-display screens on the Desk.
+pub fn main_display_size() -> (u32, u32) {
+    let r = objc2_core_graphics::CGDisplayBounds(objc2_core_graphics::CGMainDisplayID());
+    (r.size.width as u32, r.size.height as u32)
+}
+
 /// `(may capture, may inject)` without prompting.
 pub fn permissions() -> (bool, bool) {
     (CGPreflightListenEventAccess(), CGPreflightPostEventAccess())

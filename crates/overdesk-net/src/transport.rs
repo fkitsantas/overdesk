@@ -499,9 +499,29 @@ impl LinkRx {
         Ok(decode_motion(&d)?)
     }
 
+    /// A separate motion reader, so datagrams and the control stream can be read by
+    /// different tasks (the control read must never be cancelled mid-frame).
+    pub fn motion(&self) -> MotionRx {
+        MotionRx {
+            conn: self.conn.clone(),
+        }
+    }
+
     /// Resolves when the connection is gone (closed, timed out, or lost).
     pub async fn closed(&self) -> String {
         self.conn.closed().await.to_string()
+    }
+}
+
+/// Motion-lane reader of a trusted link.
+pub struct MotionRx {
+    conn: Connection,
+}
+
+impl MotionRx {
+    pub async fn recv(&self) -> Result<Motion, NetError> {
+        let d = self.conn.read_datagram().await.map_err(closed)?;
+        Ok(decode_motion(&d)?)
     }
 }
 
