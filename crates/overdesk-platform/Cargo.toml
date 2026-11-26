@@ -23,3 +23,7 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_Wi
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.14.0", default-features = false, features = ["xinput", "xtest", "xfixes", "randr"] }
+ashpd = { version = "0.14.3", default-features = false, features = ["tokio", "input_capture", "remote_desktop", "screencast"] }
+reis = { version = "0.7.1", features = ["tokio"] }
+tokio = { version = "1.54.1", features = ["rt", "sync", "time", "macros"] }
+futures-util = { version = "0.3", default-features = false }

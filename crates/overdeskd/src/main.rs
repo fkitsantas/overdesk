@@ -239,10 +239,16 @@ async fn main() -> ExitCode {
 }
 
 /// Starts the real input adapter and serves with this device's display size.
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 async fn start_native(args: Args) -> Result<(), String> {
     let (width, height) = overdeskd::native::main_display_size();
-    let os = if cfg!(windows) { Os::Windows } else { Os::MacOs };
+    let os = if cfg!(windows) {
+        Os::Windows
+    } else if cfg!(target_os = "linux") {
+        Os::Linux
+    } else {
+        Os::MacOs
+    };
     let me = Me {
         name: args.name.clone(),
         os,
@@ -254,7 +260,7 @@ async fn start_native(args: Args) -> Result<(), String> {
 }
 
 /// Fails on operating systems without an input adapter.
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 async fn start_native(_args: Args) -> Result<(), String> {
     Err("no input adapter for this OS yet; use --headless".into())
 }
