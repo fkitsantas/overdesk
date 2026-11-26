@@ -4,7 +4,7 @@
 //! - Control lane: reliable stream of length-prefixed [`Control`] frames.
 //! - Motion lane: unreliable datagrams, one bare [`Motion`] each, newest wins via [`SeqGate`].
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 pub const PROTOCOL_VERSION: u16 = 1;
 /// Frames above this are rejected before allocating, so a peer cannot exhaust memory.
@@ -87,15 +87,21 @@ pub enum Control {
         width: u32,
         height: u32,
     },
-    /// Cursor focus moves to `peer`, at that peer's local logical coordinates.
+    /// Cursor focus moves to `peer`, at that peer's local logical coordinates. Motion
+    /// datagrams of this focus period start at `seq`; older ones are stale.
     Focus {
         peer: PeerId,
         x: i32,
         y: i32,
+        seq: u32,
     },
+    /// Carries the pointer position: the control lane is not ordered against motion
+    /// datagrams, so a click must not depend on the last datagram having arrived.
     Button {
         button: Button,
         pressed: bool,
+        x: i32,
+        y: i32,
     },
     Scroll {
         dx: i32,
@@ -118,6 +124,25 @@ pub enum Control {
     },
 }
 
+/// Pre-trust handshake (ARCHITECTURE §7). Its own type, so an unpaired peer cannot
+/// send `Control` at all: those bytes never decode as pairing messages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Pairing {
+    /// Dialer commits to its nonce before seeing the listener's.
+    Commit {
+        digest: [u8; 32],
+    },
+    Nonce {
+        nonce: [u8; 32],
+    },
+    Reveal {
+        nonce: [u8; 32],
+    },
+    /// The user confirmed that both screens show the same code.
+    Confirm,
+    Reject,
+}
+
 /// Motion-lane datagram: absolute pointer position on the focused screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Motion {
@@ -138,9 +163,9 @@ fn malformed(e: postcard::Error) -> FrameError {
     FrameError::Malformed(e.to_string())
 }
 
-/// Encode one control message as `u32 big-endian length || postcard payload`.
+/// Encode one stream message as `u32 big-endian length || postcard payload`.
 /// Fails with `TooLarge` rather than emit a frame the peer would reject.
-pub fn encode_control(msg: &Control) -> Result<Vec<u8>, FrameError> {
+pub fn encode_frame<T: Serialize>(msg: &T) -> Result<Vec<u8>, FrameError> {
     let payload = postcard::to_stdvec(msg).map_err(malformed)?;
     if payload.len() > MAX_FRAME_LEN {
         return Err(FrameError::TooLarge(payload.len()));
@@ -151,9 +176,9 @@ pub fn encode_control(msg: &Control) -> Result<Vec<u8>, FrameError> {
     Ok(frame)
 }
 
-/// Decode one control frame from the front of `buf`.
+/// Decode one stream frame from the front of `buf`.
 /// `Ok(None)` means more bytes are needed; `Ok(Some((msg, consumed)))` otherwise.
-pub fn decode_control(buf: &[u8]) -> Result<Option<(Control, usize)>, FrameError> {
+pub fn decode_frame<T: DeserializeOwned>(buf: &[u8]) -> Result<Option<(T, usize)>, FrameError> {
     let Some(prefix) = buf.first_chunk::<LEN_PREFIX>() else {
         return Ok(None);
     };
@@ -194,6 +219,11 @@ pub struct SeqGate {
 }
 
 impl SeqGate {
+    /// Starts a new focus period: only `seq` and later are accepted from now on.
+    pub fn start_at(&mut self, _seq: u32) {
+        todo!()
+    }
+
     pub fn accept(&mut self, seq: u32) -> bool {
         let newer = self.last.is_none_or(|last| (seq.wrapping_sub(last) as i32) > 0);
         if newer {
@@ -223,10 +253,13 @@ mod tests {
                 peer: PEER,
                 x: 0,
                 y: 540,
+                seq: 7,
             },
             Control::Button {
                 button: Button::Left,
                 pressed: true,
+                x: 10,
+                y: -3,
             },
             Control::Scroll {
                 dx: 0,
@@ -261,16 +294,16 @@ mod tests {
     #[test]
     fn every_control_round_trips() {
         for msg in all_controls() {
-            let frame = encode_control(&msg).unwrap();
-            assert_eq!(decode_control(&frame), Ok(Some((msg, frame.len()))));
+            let frame = encode_frame(&msg).unwrap();
+            assert_eq!(decode_frame::<Control>(&frame), Ok(Some((msg, frame.len()))));
         }
     }
 
     #[test]
     fn partial_frame_needs_more_bytes() {
-        let frame = encode_control(&Control::Key { code: 4, pressed: true }).unwrap();
+        let frame = encode_frame(&Control::Key { code: 4, pressed: true }).unwrap();
         for cut in 0..frame.len() {
-            assert_eq!(decode_control(&frame[..cut]), Ok(None), "cut at {cut}");
+            assert_eq!(decode_frame::<Control>(&frame[..cut]), Ok(None), "cut at {cut}");
         }
     }
 
@@ -284,17 +317,20 @@ mod tests {
             code: 0xE3,
             pressed: false,
         };
-        let mut buf = encode_control(&a).unwrap();
-        buf.extend(encode_control(&b).unwrap());
-        let (first, used) = decode_control(&buf).unwrap().unwrap();
+        let mut buf = encode_frame(&a).unwrap();
+        buf.extend(encode_frame(&b).unwrap());
+        let (first, used): (Control, usize) = decode_frame(&buf).unwrap().unwrap();
         assert_eq!(first, a);
-        assert_eq!(decode_control(&buf[used..]).unwrap().unwrap().0, b);
+        assert_eq!(decode_frame::<Control>(&buf[used..]).unwrap().unwrap().0, b);
     }
 
     #[test]
     fn oversized_length_rejected_without_payload() {
         let len = (MAX_FRAME_LEN as u32 + 1).to_be_bytes();
-        assert_eq!(decode_control(&len), Err(FrameError::TooLarge(MAX_FRAME_LEN + 1)));
+        assert_eq!(
+            decode_frame::<Control>(&len),
+            Err(FrameError::TooLarge(MAX_FRAME_LEN + 1))
+        );
     }
 
     #[test]
@@ -302,24 +338,24 @@ mod tests {
         let msg = Control::Clipboard {
             text: "x".repeat(2 * MAX_FRAME_LEN),
         };
-        assert!(matches!(encode_control(&msg), Err(FrameError::TooLarge(_))));
+        assert!(matches!(encode_frame(&msg), Err(FrameError::TooLarge(_))));
     }
 
     #[test]
     fn garbage_payload_is_malformed() {
         assert!(matches!(
-            decode_control(&[0, 0, 0, 1, 0xFF]),
+            decode_frame::<Control>(&[0, 0, 0, 1, 0xFF]),
             Err(FrameError::Malformed(_))
         ));
     }
 
     #[test]
     fn trailing_bytes_inside_frame_are_malformed() {
-        let mut frame = encode_control(&Control::Key { code: 4, pressed: true }).unwrap();
+        let mut frame = encode_frame(&Control::Key { code: 4, pressed: true }).unwrap();
         frame.push(0);
         let len = (frame.len() - LEN_PREFIX) as u32;
         frame[..LEN_PREFIX].copy_from_slice(&len.to_be_bytes());
-        assert!(matches!(decode_control(&frame), Err(FrameError::Malformed(_))));
+        assert!(matches!(decode_frame::<Control>(&frame), Err(FrameError::Malformed(_))));
     }
 
     #[test]
@@ -363,5 +399,37 @@ mod tests {
         assert!(g.accept(0));
         assert!(g.accept(1));
         assert!(!g.accept(u32::MAX));
+    }
+
+    #[test]
+    fn pairing_messages_round_trip() {
+        for msg in [
+            Pairing::Commit { digest: [1; 32] },
+            Pairing::Nonce { nonce: [2; 32] },
+            Pairing::Reveal { nonce: [3; 32] },
+            Pairing::Confirm,
+            Pairing::Reject,
+        ] {
+            let frame = encode_frame(&msg).unwrap();
+            assert_eq!(decode_frame::<Pairing>(&frame), Ok(Some((msg, frame.len()))));
+        }
+    }
+
+    #[test]
+    fn seq_gate_new_focus_period_drops_stale_motion() {
+        let mut g = SeqGate::default();
+        assert!(g.accept(100));
+        g.start_at(200);
+        assert!(!g.accept(150), "datagram from the previous focus period");
+        assert!(g.accept(200));
+        assert!(g.accept(201));
+    }
+
+    #[test]
+    fn seq_gate_start_at_works_on_fresh_gate_and_across_wrap() {
+        let mut g = SeqGate::default();
+        g.start_at(0);
+        assert!(!g.accept(u32::MAX));
+        assert!(g.accept(0));
     }
 }
