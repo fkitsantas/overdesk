@@ -96,7 +96,7 @@ fn os_from_str(s: &str) -> Option<Os> {
 /// characters such as bidirectional overrides and zero-width joiners, the byte-order
 /// mark, and line or paragraph separators. A device name carrying them could display as
 /// a different name in the Nearby list, so they are removed.
-fn is_invisible(c: char) -> bool {
+pub fn is_invisible(c: char) -> bool {
     matches!(
         c,
         '\u{00AD}'                    // soft hyphen
