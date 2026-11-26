@@ -181,8 +181,17 @@ impl HeldKeys {
 /// Maps a HID key usage typed on a `from` keyboard to the usage the `to` OS should see.
 /// Mac <-> PC swaps Command and Control so Cmd+C on a Mac keyboard copies on Windows,
 /// and Ctrl+C on a PC keyboard copies on the Mac.
-pub fn remap_key(_code: u32, _from: Os, _to: Os) -> u32 {
-    todo!()
+pub fn remap_key(code: u32, from: Os, to: Os) -> u32 {
+    if (from == Os::MacOs) == (to == Os::MacOs) {
+        return code;
+    }
+    match code {
+        0xE0 => 0xE3, // left Control -> left GUI (Command)
+        0xE3 => 0xE0,
+        0xE4 => 0xE7, // right Control -> right GUI
+        0xE7 => 0xE4,
+        _ => code,
+    }
 }
 
 #[cfg(test)]
