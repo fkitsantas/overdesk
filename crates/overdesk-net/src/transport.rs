@@ -740,6 +740,23 @@ async fn accept_transfer(conn: &Connection) -> Result<([u8; 16], impl AsyncRead 
     Ok((id, recv))
 }
 
+/// Opens transfer streams on a trusted link from any task; see [`LinkTx::transfer_opener`].
+/// Cheap to clone.
+#[derive(Clone)]
+pub struct TransferOpener(Connection);
+
+impl TransferOpener {
+    /// Like [`LinkTx::open_transfer`]. Wrap it in a timeout: a peer that never grants a
+    /// stream (one bound without transfers) leaves it pending.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::Closed`] once the connection is gone.
+    pub async fn open_transfer(&self, id: [u8; 16]) -> Result<impl AsyncWrite + Unpin + use<>, NetError> {
+        open_transfer(&self.0, id).await
+    }
+}
+
 /// Writer half of a trusted [`Link`].
 ///
 /// Trust was checked when the link was split, so its methods do not check again.
@@ -783,6 +800,12 @@ impl LinkTx {
     /// A handle that can close this link from another task.
     pub fn closer(&self) -> Closer {
         Closer(self.conn.clone())
+    }
+
+    /// A handle that opens transfer streams from another task, so a peer slow to grant one
+    /// never holds up the task sending control messages.
+    pub fn transfer_opener(&self) -> TransferOpener {
+        TransferOpener(self.conn.clone())
     }
 
     /// Closes the whole connection, which also ends the reader half.
