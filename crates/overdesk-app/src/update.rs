@@ -141,7 +141,7 @@ fn policy_disabled() -> bool {
 
 /// Whether the installed app can be replaced without an admin prompt. The updater crate
 /// would otherwise ask for administrator rights on macOS; Overdesk never does, so it skips
-/// the update instead. Windows installs per user and always qualifies.
+/// the update instead. Windows installs per user and always qualifies. Linux needs a writable AppImage.
 fn replaceable_without_admin() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -154,7 +154,12 @@ fn replaceable_without_admin() -> bool {
         let _ = std::fs::remove_file(&probe);
         ok
     }
-    #[cfg(not(target_os = "macos"))]
+    // A .deb belongs to the package manager; only an AppImage replaces itself in place.
+    #[cfg(target_os = "linux")]
+    {
+        std::env::var_os("APPIMAGE").is_some_and(|p| std::fs::OpenOptions::new().append(true).open(p).is_ok())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     true
 }
 
@@ -250,6 +255,11 @@ fn vet(signature_b64: &str, offered: &str, current: &Version) -> Result<(), Stri
 /// replaces `%LOCALAPPDATA%\Programs\Overdesk` while this exe is locked, so a backup would
 /// have to be restored by a helper that outlives the app. Upgrade path: copy that folder
 /// before install and restore it from a tiny per-user `HKCU\...\RunOnce` helper.
+///
+/// shortcut: Linux has no rollback either. An AppImage could be copied aside like the macOS
+/// bundle, but the updater swaps the file while it runs and the restore needs the same
+/// start-up hook, which is untested without a Linux desktop. Upgrade: copy `$APPIMAGE` in
+/// `prepare` and restore it in `startup`, as on macOS.
 mod rollback {
     #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 

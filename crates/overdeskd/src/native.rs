@@ -6,10 +6,10 @@ use std::sync::{Arc, Mutex};
 
 use overdesk_core::engine::Action;
 use overdesk_platform::input::Captured;
-#[cfg(target_os = "macos")]
-pub use overdesk_platform::mac::ffi::{Capture, Injector, main_display_size, permissions, request_permissions};
 #[cfg(target_os = "linux")]
 pub use overdesk_platform::linux::ffi::{Capture, Injector, main_display_size, permissions, request_permissions};
+#[cfg(target_os = "macos")]
+pub use overdesk_platform::mac::ffi::{Capture, Injector, main_display_size, permissions, request_permissions};
 #[cfg(windows)]
 pub use overdesk_platform::win::ffi::{Capture, Injector, main_display_size, permissions, request_permissions};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};

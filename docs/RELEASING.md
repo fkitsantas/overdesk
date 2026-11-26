@@ -22,6 +22,6 @@ Each release is a signed build that installed apps pick up by themselves. Run th
 6. Rollback hand test (macOS): install 0.1.0, offer 0.1.1 built to crash at startup, restart into it, and after three launches expect 0.1.0 back and `bad-updates` listing 0.1.1. If a release is broken, ship a newer fixed version: installed apps skip a version only after it failed on that Mac.
 7. Check with an installed older build: `OVERDESK_UPDATE_URL=... ` and look for `overdesk: update X downloaded and verified` on stderr.
 
-Manifest shape (the crate's dynamic format): `{"version":"0.1.1","url":"https://.../Overdesk_0.1.1_aarch64.app.tar.gz","signature":"<contents of the .sig file>","format":"app"}` (`"nsis"` on Windows). `target` is `macos` or `windows`; `arch` is `aarch64` or `x86_64`.
+Manifest shape (the crate's dynamic format): `{"version":"0.1.1","url":"https://.../Overdesk_0.1.1_aarch64.app.tar.gz","signature":"<contents of the .sig file>","format":"app"}` (`"nsis"` on Windows). `target` is `macos`, `windows` or `linux` (Linux: `"format":"appimage"`, and the file is the signed `Overdesk_<v>_<arch>.AppImage.tar.gz`); `arch` is `aarch64` or `x86_64`.
 
 Testing without publishing: `OVERDESK_VERSION=0.1.1 scripts/package.sh`, serve the manifest directory with `/usr/bin/python3 -m http.server`, and run an older packaged app with `OVERDESK_UPDATE_URL='http://127.0.0.1:8000/{{target}}/{{arch}}/{{current_version}}'`.

@@ -14,6 +14,7 @@ allow = [
     "NCSA", # permissive (LLVM-style), via iced
     "Zlib", # permissive, via iced/winit
     "Unicode-3.0",
+    "Unlicense", # ksni (Linux tray): public-domain dedication, FSF-approved, AGPL-compatible
 ]
 
 [bans]

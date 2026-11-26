@@ -4,7 +4,12 @@
   "category": "Utility",
   "outDir": "../../target/packages",
   "binariesDir": "../../target/release",
-  "binaries": [{ "path": "overdesk", "main": true }],
+  "binaries": [
+    {
+      "path": "overdesk",
+      "main": true
+    }
+  ],
   "icons": [
     "../../assets/brand/icons/app-icon-32.png",
     "../../assets/brand/icons/app-icon-128.png",
@@ -17,5 +22,18 @@
     "infoPlistPath": "macos/Info.plist",
     "signingIdentity": "-"
   },
-  "nsis": { "installMode": "currentUser" }
+  "nsis": {
+    "installMode": "currentUser"
+  },
+  "deb": {
+    "depends": [
+      "libxkbcommon0",
+      "libwayland-client0",
+      "libxdo3"
+    ],
+    "section": "utils"
+  },
+  "appimage": {},
+  "description": "Control your other computers from this one.",
+  "shortDescription": "Overdesk"
 }

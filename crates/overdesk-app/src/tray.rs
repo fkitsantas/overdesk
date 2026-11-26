@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! The menu-bar (macOS) and system-tray (Windows) icon: a status line, a way back to the
+//! The menu-bar (macOS), system-tray (Windows) and notification-area (Linux) icon: a status line, a way back to the
 //! window, Disconnect and Quit. Closing the window only hides it, so this icon is how
 //! the app is reopened and ended.
+//!
+//! On Linux the icon is a StatusNotifierItem served over D-Bus from tray-icon's own worker
+//! thread (its `ksni` backend), so no GTK main loop is needed next to iced. A desktop with
+//! no StatusNotifier host (stock GNOME without the AppIndicator extension) shows no icon;
+//! the window then still works, but closing it hides it with no way back, so see
+//! `Message::CloseRequested`, which quits when creating the tray failed.
 
 use iced::futures::SinkExt;
 use overdesk_core::engine::Mode;
@@ -61,6 +67,10 @@ impl Tray {
     /// Creates the icon and its menu, showing `state`. Must run on the main thread once
     /// the event loop is up (macOS requirement).
     pub fn new(state: Option<&AppState>, login: bool) -> Result<Self, String> {
+        #[cfg(target_os = "linux")]
+        if !host_present() {
+            return Err("no StatusNotifier host on the session bus".into());
+        }
         let status = MenuItem::new("Not connected", false, None);
         let disconnect = MenuItem::with_id(DISCONNECT, "Disconnect", false, None);
         let login = CheckMenuItem::with_id(LOGIN, "Open at login", true, login, None);
@@ -110,6 +120,19 @@ impl Tray {
             .set_enabled(matches!(state.phase, Phase::Connected { .. }));
         let _ = self.icon.set_tooltip(Some(format!("Overdesk: {text}")));
     }
+}
+
+/// Whether a StatusNotifier host (the desktop's tray) is running. tray-icon's Linux backend
+/// assumes one and would otherwise draw nothing while the window hid itself on close.
+///
+/// shortcut: asks `busctl` (systemd); if it is missing the tray is treated as absent and
+/// closing the window quits. Upgrade: a `zbus` name-owner query.
+#[cfg(target_os = "linux")]
+fn host_present() -> bool {
+    std::process::Command::new("busctl")
+        .args(["--user", "status", "org.kde.StatusNotifierWatcher"])
+        .output()
+        .is_ok_and(|o| o.status.success())
 }
 
 /// The status line for a state: "Not connected", "Connected to {peer}", "Using {peer}"

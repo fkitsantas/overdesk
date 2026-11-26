@@ -19,10 +19,17 @@ overdesk-proto.workspace = true
 overdeskd = { path = "../overdeskd" }
 tokio = { version = "1.54.1", features = ["sync", "time", "rt"] }
 png = "0.18.1"
-tray-icon = "0.27.0"
 cargo-packager-updater = "0.2.3"
 base64 = "0.22"
 auto-launch = "0.6.0"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tray-icon = "0.27.0"
+
+# Linux uses the StatusNotifierItem (D-Bus) backend: its own worker thread, no GTK and no
+# libayatana-appindicator, so it fits an iced/winit main loop and the AppImage needs no GTK.
+[target.'cfg(target_os = "linux")'.dependencies]
+tray-icon = { version = "0.27.0", default-features = false, features = ["ksni"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry"] }
