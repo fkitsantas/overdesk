@@ -59,9 +59,11 @@ pub fn request_permissions() {}
 pub fn clipboard_is_private() -> bool {
     match kind() {
         SessionKind::X11 => x11::clipboard_is_private(),
-        // The input path is what the Wayland backend covers; no private-copy hint is read
-        // there yet, so nothing is reported private.
-        SessionKind::Wayland => false,
+        // Fail closed: no private-copy hint is read on Wayland yet, so a password manager's copy
+        // can't be told apart and nothing is sent from here (receiving still works).
+        // shortcut: no outbound clipboard on Wayland, until the offered MIME types are checked
+        // for x-kde-passwordManagerHint through ext-data-control.
+        SessionKind::Wayland => true,
     }
 }
 

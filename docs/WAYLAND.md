@@ -86,7 +86,7 @@ windows).
 - Absolute pointer motion needs a ScreenCast stream; relative motion with a tracked position is used (see Injection).
 - Fractional scaling: zone coordinates differ from our pixels.
 - The escape chord must be read from EIS keys while captured.
-- `clipboard_is_private` is `false` on Wayland (no private-copy hint is read yet).
+- Clipboard is not sent from a Wayland session yet (fail closed): no private-copy hint is read there, so a password manager's copy can't be told apart. Receiving works.
 - Clipboard: GNOME has no data-control protocol for background apps (KDE 6.7, Sway 1.11 and Hyprland have
   `ext-data-control-v1`); on GNOME use the RemoteDesktop clipboard, or accept no clipboard.
 
