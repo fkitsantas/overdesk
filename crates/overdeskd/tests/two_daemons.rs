@@ -88,7 +88,7 @@ async fn mac_drives_pc_and_pc_cleans_up_when_mac_vanishes() {
 
     let pc_log = pc_fake.log.clone();
     wait_for("PC to inject the entry point", || {
-        pc_log.lock().unwrap().contains(&Action::InjectMove { x: 4, y: 450 })
+        pc_log.lock().unwrap().contains(&Action::InjectMove { x: 4, y: 540 })
     })
     .await;
     wait_for("PC to inject Cmd as Ctrl", || {

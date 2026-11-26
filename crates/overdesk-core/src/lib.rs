@@ -382,7 +382,7 @@ mod tests {
                 from: 0,
                 to: 1,
                 x: 0,
-                y: 540
+                y: 720
             }
         );
         assert_eq!(s.active(), 1);
@@ -397,7 +397,7 @@ mod tests {
                 from: 0,
                 to: 1,
                 x: 2559,
-                y: 540
+                y: 720
             }
         );
     }
@@ -409,16 +409,65 @@ mod tests {
     }
 
     #[test]
-    fn taller_neighbour_region_without_counterpart_clamps() {
-        // Desk is taller: below y=1080 there is nothing to the left.
+    fn single_neighbour_maps_the_edge_proportionally() {
+        // Desk is 1440 tall, laptop 1080: the whole left edge of the desk leads onto the
+        // laptop, scaled, instead of a dead zone below y = 1080.
         let mut s = Switcher::new(two_screens(), 1).unwrap();
-        s.move_by(0, 600); // y = 1320
+        s.move_by(0, 600); // desk y = 1320
         assert_eq!(
             s.move_by(-5000, 0),
-            Motion::Within {
-                screen: 1,
+            Motion::Switched {
+                from: 1,
+                to: 0,
                 x: 0,
-                y: 1320
+                y: 990
+            }
+        );
+    }
+
+    #[test]
+    fn tall_mac_beside_short_pc_has_no_dead_zone() {
+        let layout = Layout::new(vec![screen("mac", 0, 0, 3840, 2160), screen("pc", 3840, 0, 1920, 1080)]).unwrap();
+        let mut s = Switcher::new(layout, 0).unwrap();
+        s.set_local(0, 3839, 1959);
+        assert_eq!(
+            s.move_by(5, 0),
+            Motion::Switched {
+                from: 0,
+                to: 1,
+                x: 4,
+                y: 979
+            }
+        );
+        assert_eq!(
+            s.move_by(-6, 0),
+            Motion::Switched {
+                from: 1,
+                to: 0,
+                x: 3838,
+                y: 1958
+            }
+        );
+    }
+
+    #[test]
+    fn several_neighbours_on_one_edge_keep_absolute_positions() {
+        // Two monitors stacked to the right: each keeps its own band.
+        let layout = Layout::new(vec![
+            screen("a", 0, 0, 100, 200),
+            screen("top", 100, 0, 100, 100),
+            screen("bottom", 100, 100, 100, 100),
+        ])
+        .unwrap();
+        let mut s = Switcher::new(layout, 0).unwrap();
+        s.set_local(0, 99, 150);
+        assert_eq!(
+            s.move_by(1, 0),
+            Motion::Switched {
+                from: 0,
+                to: 2,
+                x: 0,
+                y: 50
             }
         );
     }

@@ -522,7 +522,7 @@ mod tests {
             },
             0,
         );
-        assert_eq!(focus_of(&a), Some((PC, PC, 4, 450)));
+        assert_eq!(focus_of(&a), Some((PC, PC, 4, 540)), "450 of 900 maps to 540 of 1080");
         assert!(a.contains(&Action::Swallow(true)));
     }
 
@@ -578,7 +578,7 @@ mod tests {
         };
         let (s1, x1, y1) = seq(&a);
         let (s2, x2, _) = seq(&b);
-        assert_eq!((x1, y1, x2), (14, 451, 24));
+        assert_eq!((x1, y1, x2), (14, 541, 24));
         assert!(s2 > s1);
         assert_eq!(
             e.handle(
@@ -612,7 +612,7 @@ mod tests {
                     button: Button::Left,
                     pressed: true,
                     x: 24,
-                    y: 452
+                    y: 542
                 }
             }]
         );
