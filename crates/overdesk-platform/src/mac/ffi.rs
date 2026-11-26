@@ -13,7 +13,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-use objc2_core_foundation::{CFMachPort, CFRetained, CFRunLoop, CGPoint, kCFRunLoopDefaultMode};
+use objc2_core_foundation::{
+    CFMachPort, CFRetained, CFRunLoop, CFString, CFType, CGPoint, kCFBooleanTrue, kCFRunLoopDefaultMode,
+};
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventSource, CGEventSourceStateID, CGEventTapCallBack, CGEventTapLocation,
     CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy, CGEventType, CGMouseButton, CGPreflightListenEventAccess,
@@ -77,17 +79,40 @@ struct TapCtx {
     local: RefCell<LocalDowns>,
     sub: RefCell<Subpixel>,
     chord: RefCell<EscapeChord>,
-    /// Whether this tap last detached the cursor from the mouse.
+    /// Whether this tap last hid the cursor.
     detached: Cell<bool>,
-    /// Where the cursor is held while swallowing.
-    frozen: Cell<Option<CGPoint>>,
 }
 
-/// While swallowing, the cursor must stay put: swallowed events never reach apps, but
-/// macOS still moves the cursor itself unless it is detached from the mouse. Deltas
-/// keep arriving at the tap either way.
+unsafe extern "C" {
+    // Private SkyLight/CoreGraphics API. A background process cannot hide the cursor
+    // (or stop it moving) through any public API; Deskflow, Barrier and Synergy rely on
+    // this property for the same reason. If a macOS release breaks it, only the cursor's
+    // visibility while on another device is affected.
+    fn _CGSDefaultConnection() -> i32;
+    fn CGSSetConnectionProperty(cid: i32, target: i32, key: &CFString, value: &CFType) -> i32;
+}
+
+/// Lets this background process hide the cursor. Called once per tap.
+fn allow_background_cursor_hiding() {
+    // SAFETY: plain C calls with a valid connection id and live CF objects.
+    unsafe {
+        let cid = _CGSDefaultConnection();
+        if let Some(t) = kCFBooleanTrue {
+            CGSSetConnectionProperty(cid, cid, &CFString::from_static_str("SetsCursorInBackground"), t);
+        }
+    }
+}
+
+/// While swallowing, the Mac's cursor is hidden: swallowed moves still move it, and no
+/// public API stops that for a background process. Hide and show calls are counted by
+/// macOS, so callers keep them balanced via `TapCtx::detached`.
 fn detach_cursor(on: bool) {
-    let _ = objc2_core_graphics::CGAssociateMouseAndMouseCursorPosition(!on);
+    let display = objc2_core_graphics::CGMainDisplayID();
+    let _ = if on {
+        objc2_core_graphics::CGDisplayHideCursor(display)
+    } else {
+        objc2_core_graphics::CGDisplayShowCursor(display)
+    };
 }
 
 /// `kCGEventFlagMaskAlphaShift`: Caps Lock state, owned by the system, never by us.
@@ -133,10 +158,8 @@ impl Capture {
     /// While on, captured input is consumed instead of reaching local apps
     /// (focus is on another peer).
     pub fn set_swallow(&self, on: bool) {
+        // The tap hides or shows the cursor on its next event, keeping the counts balanced.
         self.swallow.store(on, Ordering::Relaxed);
-        // Immediate, so the cursor stops at the edge as focus leaves; the tap
-        // reconciles again on its next event.
-        detach_cursor(on);
     }
 }
 
@@ -178,7 +201,6 @@ fn run_tap(tx: Sender<Captured>, swallow: Arc<AtomicBool>, stop: Arc<AtomicBool>
         sub: RefCell::new(Subpixel::default()),
         chord: RefCell::new(EscapeChord::default()),
         detached: Cell::new(false),
-        frozen: Cell::new(None),
     });
     let ctx_ptr = &*ctx as *const TapCtx as *mut c_void;
     let callback: CGEventTapCallBack = Some(tap_callback);
@@ -211,10 +233,7 @@ fn run_tap(tx: Sender<Captured>, swallow: Arc<AtomicBool>, stop: Arc<AtomicBool>
     let mode = unsafe { kCFRunLoopDefaultMode };
     run_loop.add_source(Some(&source), mode);
     CGEvent::tap_enable(&port, true);
-    // Warping otherwise suppresses local mouse input for 0.25 s, making the held
-    // cursor stutter and swallowing deltas we need.
-    #[allow(deprecated)]
-    let _ = objc2_core_graphics::CGSetLocalEventsSuppressionInterval(0.0);
+    allow_background_cursor_hiding();
     let _ = ready.send(Ok(()));
 
     // Poll the stop flag between short run-loop slices instead of sharing the
@@ -272,26 +291,10 @@ fn handle(ctx: &TapCtx, ty: CGEventType, ev: &CGEvent, raw: *mut CGEvent) -> *mu
     }
     let swallowing = ctx.swallow.load(Ordering::Relaxed);
     // Reconciled here so every path that ends swallowing (engine, escape chord, dead
-    // receiver) also gives the cursor back.
+    // receiver) also shows the cursor again.
     if ctx.detached.get() != swallowing {
         detach_cursor(swallowing);
         ctx.detached.set(swallowing);
-    }
-    // Detaching only works for a foreground app, and swallowing does not stop the
-    // cursor either: hold it where it left the screen by warping back on every move.
-    let is_move = matches!(
-        ty,
-        CGEventType::MouseMoved
-            | CGEventType::LeftMouseDragged
-            | CGEventType::RightMouseDragged
-            | CGEventType::OtherMouseDragged
-    );
-    if !swallowing {
-        ctx.frozen.set(None);
-    } else if is_move {
-        let at = ctx.frozen.get().unwrap_or_else(|| CGEvent::location(Some(ev)));
-        ctx.frozen.set(Some(at));
-        let _ = objc2_core_graphics::CGWarpMouseCursorPosition(at);
     }
     let deliver = match edge {
         Some((held, down)) => ctx.local.borrow_mut().deliver_locally(held, down, swallowing),
