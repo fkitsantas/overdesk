@@ -6,6 +6,7 @@ use iced::mouse::Cursor;
 use iced::widget::canvas::{self, Frame, Geometry, Path, Program, Stroke, Text, gradient::Linear};
 use iced::{Point, Rectangle, Renderer, Size, Theme, alignment};
 use overdesk_core::engine::Mode;
+use overdesk_proto::PeerId;
 use overdeskd::controller::ScreenView;
 
 use crate::style::{INDIGO, INK, TEAL, VIOLET, alpha, hairline, ink, is_dark, muted};
@@ -14,7 +15,9 @@ use crate::style::{INDIGO, INK, TEAL, VIOLET, alpha, hairline, ink, is_dark, mut
 pub struct DeskMap<'a> {
     /// The screens to draw, in Desk coordinates.
     pub screens: &'a [ScreenView],
-    /// Where the cursor is, which decides the teal screen and the ribbon's flow.
+    /// The device whose screen has the cursor, which decides the teal screen.
+    pub focus: Option<PeerId>,
+    /// Where the cursor is, which decides the ribbon's flow.
     pub mode: Mode,
     /// 0.0..1.0, advanced by animation frames while the cursor is away.
     pub phase: f32,
@@ -77,10 +80,8 @@ impl<Message> Program<Message> for DeskMap<'_> {
             })
             .collect();
 
-        // The cursor is on this device unless this device is driving the peer.
-        let active_is_me = !matches!(self.mode, Mode::Driving(_));
         for (r, s) in &rects {
-            let on = s.me == active_is_me;
+            let on = self.focus == Some(s.id);
             let face = Path::rounded_rectangle(r.position(), r.size(), 12.0.into());
             // Depth: a soft shadow below, then a slightly larger bezel behind the face.
             for i in 0..4 {
@@ -172,7 +173,7 @@ impl<Message> Program<Message> for DeskMap<'_> {
             if self.mode != Mode::Local {
                 // Light flows toward whichever screen has the cursor.
                 // The screens are sorted left to right, so `b` is the right-hand one.
-                let dir = if sb.me == active_is_me { 1.0 } else { -1.0 };
+                let dir = if self.focus == Some(sb.id) { 1.0 } else { -1.0 };
                 frame.stroke(
                     &ribbon,
                     Stroke {

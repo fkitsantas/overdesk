@@ -635,8 +635,11 @@ mod tests {
     fn never_installs_while_driving_or_connecting() {
         let peer = || "Mac".to_string();
         let connected = |mode| Phase::Connected {
-            peer: peer(),
-            peer_os: overdesk_proto::Os::MacOs,
+            peers: vec![overdeskd::controller::PeerView {
+                id: overdesk_proto::PeerId([2; 16]),
+                name: peer(),
+                os: overdesk_proto::Os::MacOs,
+            }],
             mode,
         };
         assert!(install_allowed(&Phase::Idle));

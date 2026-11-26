@@ -94,7 +94,7 @@ const CLIPBOARD_FRAME_OVERHEAD: usize = 16;
 
 /// Decides which local clipboard changes go to the peer.
 /// The free tier shares plain text only; images and files are Pro.
-struct ClipboardSync {
+pub struct ClipboardSync {
     /// The text seen on the local clipboard at the last check.
     seen: Option<String>,
     /// The text the peer sent that has not yet been replaced locally; never echoed back.
@@ -104,7 +104,7 @@ struct ClipboardSync {
 impl ClipboardSync {
     /// Starts from `initial`, the clipboard as it was before the session: whatever was
     /// copied earlier is private until the user copies something during the session.
-    fn new(initial: Option<String>) -> Self {
+    pub fn new(initial: Option<String>) -> Self {
         Self {
             seen: initial,
             remote: None,
@@ -112,7 +112,7 @@ impl ClipboardSync {
     }
 
     /// Feeds one local reading; returns the text to send if it is a new, sendable copy.
-    fn local_changed(&mut self, text: Option<String>) -> Option<String> {
+    pub fn local_changed(&mut self, text: Option<String>) -> Option<String> {
         if text == self.seen {
             return None;
         }
@@ -122,9 +122,52 @@ impl ClipboardSync {
     }
 
     /// Records text the peer sent, so the change it causes here is not sent back.
-    fn received(&mut self, text: &str) {
+    pub fn received(&mut self, text: &str) {
         self.remote = Some(text.to_owned());
     }
+}
+
+/// Who a peer said it is in `Hello`, after the trust check passed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Introduced {
+    /// The peer's id.
+    pub id: PeerId,
+    /// The peer's human-readable device name.
+    pub name: String,
+    /// The peer's operating system.
+    pub os: Os,
+    /// The peer's screen width in pixels.
+    pub width: u32,
+    /// The peer's screen height in pixels.
+    pub height: u32,
+}
+
+/// Trusts a pinned peer and exchanges `Hello`; nothing else is sent, so the caller
+/// decides what Desk (if any) follows. The link stays whole.
+pub async fn introduce(
+    link: &mut Link,
+    pinned: impl Fn(&Fingerprint) -> bool,
+    me: &Me,
+) -> Result<Introduced, DaemonError> {
+    link.trust(pinned).map_err(SessionError::from)?;
+    let Control::Hello {
+        peer,
+        name,
+        os,
+        width,
+        height,
+        ..
+    } = hello(link, me).await?
+    else {
+        unreachable!("hello() only returns Hello")
+    };
+    Ok(Introduced {
+        id: peer,
+        name,
+        os,
+        width,
+        height,
+    })
 }
 
 /// Trusts a pinned peer, exchanges `Hello`, agrees on one Desk (the dialer authors it,
@@ -135,18 +178,13 @@ pub async fn establish(
     me: &Me,
     side: Side,
 ) -> Result<Session, DaemonError> {
-    link.trust(pinned).map_err(SessionError::from)?;
-    let Control::Hello {
-        peer,
+    let Introduced {
+        id: peer,
         name,
         os,
         width,
         height,
-        ..
-    } = hello(&mut link, me).await?
-    else {
-        unreachable!("hello() only returns Hello")
-    };
+    } = introduce(&mut link, pinned, me).await?;
     let mine = peer_id(&link.local_fingerprint());
     // Screen names come from ids: two Macs both called "MacBook" must not collide.
     let screen = |p: PeerId, x: i32, w: u32, h: u32| DeskScreen {
@@ -209,7 +247,7 @@ pub async fn establish(
 }
 
 /// Formats a peer id as lowercase hex, used as a stable, collision-free screen name.
-fn hex(p: &PeerId) -> String {
+pub fn hex(p: &PeerId) -> String {
     p.0.iter().map(|b| format!("{b:02x}")).collect()
 }
 

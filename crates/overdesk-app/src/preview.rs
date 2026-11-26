@@ -8,15 +8,17 @@ use iced::Task;
 use iced::theme::Mode as ThemeMode;
 use overdesk_core::engine::Mode;
 use overdesk_proto::{Os, PeerId};
-use overdeskd::controller::{AppState, NearbyDevice, Phase, ScreenView};
+use overdeskd::controller::{AppState, NearbyDevice, PeerView, Phase, ScreenView};
 
 use crate::Message;
 
 /// The fixed state named by `which`, and the permission flags to show (if the
 /// permissions screen is wanted instead).
 pub fn state(which: &str) -> (AppState, Option<(bool, bool)>) {
+    let (me, peer) = (PeerId([1; 16]), PeerId([2; 16]));
     let desk = vec![
         ScreenView {
+            id: me,
             name: "MacBook Pro".into(),
             x: 0,
             y: 0,
@@ -25,6 +27,7 @@ pub fn state(which: &str) -> (AppState, Option<(bool, bool)>) {
             me: true,
         },
         ScreenView {
+            id: peer,
             name: "DESKTOP-7Q2K4LM".into(),
             x: 3840,
             y: 0,
@@ -33,10 +36,12 @@ pub fn state(which: &str) -> (AppState, Option<(bool, bool)>) {
             me: false,
         },
     ];
-    let peer = PeerId([2; 16]);
     let connected = |mode| Phase::Connected {
-        peer: "DESKTOP-7Q2K4LM".into(),
-        peer_os: Os::Windows,
+        peers: vec![PeerView {
+            id: peer,
+            name: "DESKTOP-7Q2K4LM".into(),
+            os: Os::Windows,
+        }],
         mode,
     };
     let (phase, desk, perms) = match which {
@@ -56,6 +61,9 @@ pub fn state(which: &str) -> (AppState, Option<(bool, bool)>) {
         address: Some("0.0.0.0:24801".parse().unwrap()),
         phase,
         desk,
+        // The cursor is on the peer only while this device drives it.
+        focus: matches!(which, "local" | "driving" | "driven").then_some(if which == "driving" { peer } else { me }),
+        can_arrange: false,
         pairing_open: which == "pairing-open",
         nearby: if which == "idle" {
             vec![

@@ -54,10 +54,8 @@ pub enum Phase {
     },
     /// A session is running.
     Connected {
-        /// The peer's device name.
-        peer: String,
-        /// The peer's operating system.
-        peer_os: Os,
+        /// The connected peers: exactly one in the open core.
+        peers: Vec<PeerView>,
         /// Where the cursor is: on this device, driving the peer, or driven by it.
         mode: Mode,
     },
@@ -70,9 +68,22 @@ pub enum Phase {
     Error(String),
 }
 
+/// A connected peer, as the UI shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerView {
+    /// The peer's id.
+    pub id: PeerId,
+    /// The peer's device name.
+    pub name: String,
+    /// The peer's operating system.
+    pub os: Os,
+}
+
 /// One screen of the shared Desk, named for people.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenView {
+    /// The device that owns this screen.
+    pub id: PeerId,
     /// The device name shown on the screen.
     pub name: String,
     /// The screen's left edge in Desk coordinates.
@@ -120,6 +131,11 @@ pub struct AppState {
     pub phase: Phase,
     /// The screens of the shared Desk; empty unless connected.
     pub desk: Vec<ScreenView>,
+    /// The device whose screen has the cursor; `None` when not connected.
+    pub focus: Option<PeerId>,
+    /// Whether the UI may let the user rearrange the screens. Always false in the open
+    /// core; the Pro module sets it.
+    pub can_arrange: bool,
     /// Whether unknown devices may currently start pairing with this one.
     pub pairing_open: bool,
     /// Other Overdesk computers on the network, sorted by name.
@@ -147,6 +163,16 @@ pub enum Command {
     Disconnect,
     /// Opens (for [`PAIRING_WINDOW`]) or closes pairing for devices that dial in.
     AllowPairing(bool),
+    /// Puts `peer`'s screen on `side` of `anchor`'s. Used by Pro to arrange 3+ computers;
+    /// the open controller ignores it.
+    Place {
+        /// The device whose screen moves.
+        peer: PeerId,
+        /// The device whose screen it is placed against.
+        anchor: PeerId,
+        /// Which side of the anchor's screen it goes on.
+        side: Side,
+    },
 }
 
 /// How long "Pair a device" stays open for incoming devices.
@@ -186,7 +212,7 @@ const FREE_PAIRING_FAILURES: u32 = 3;
 
 /// How long inbound pairing is refused after `failures` consecutive failures:
 /// nothing for the first few, then 10 s, 30 s and a 60 s cap.
-fn pairing_backoff(failures: u32) -> Duration {
+pub fn pairing_backoff(failures: u32) -> Duration {
     Duration::from_secs(match failures {
         0..FREE_PAIRING_FAILURES => 0,
         FREE_PAIRING_FAILURES => 10,
@@ -198,7 +224,7 @@ fn pairing_backoff(failures: u32) -> Duration {
 /// Consecutive failed inbound pairings and the time before which none is accepted.
 /// Global on purpose: an attacker can change address.
 #[derive(Default)]
-struct Backoff {
+pub struct Backoff {
     /// Failures since the last successful pairing.
     failures: u32,
     /// Inbound pairing is refused until then.
@@ -207,12 +233,12 @@ struct Backoff {
 
 impl Backoff {
     /// Whether inbound pairing is refused at `now`.
-    fn blocked(&self, now: tokio::time::Instant) -> bool {
+    pub fn blocked(&self, now: tokio::time::Instant) -> bool {
         self.until.is_some_and(|t| now < t)
     }
 
     /// Counts a failed attempt and starts the delay it has earned.
-    fn fail(&mut self, now: tokio::time::Instant) {
+    pub fn fail(&mut self, now: tokio::time::Instant) {
         self.failures = self.failures.saturating_add(1);
         self.until = Some(now + pairing_backoff(self.failures));
     }
@@ -286,6 +312,7 @@ impl<P> Shared<P> {
             if let Some(d) = desk {
                 s.desk = d;
             }
+            s.focus = focus(&s.phase, &s.desk);
         });
     }
 
@@ -297,6 +324,7 @@ impl<P> Shared<P> {
             generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
             s.phase = phase;
             s.desk = Vec::new();
+            s.focus = None;
         });
         generation
     }
@@ -316,6 +344,8 @@ pub async fn spawn<P: Platform + Clone + Sync>(
         address: node.local_addr().ok(),
         phase: Phase::Idle,
         desk: Vec::new(),
+        focus: None,
+        can_arrange: false,
         pairing_open: false,
         nearby: Vec::new(),
     });
@@ -417,6 +447,8 @@ async fn control<P: Platform + Clone + Sync>(
                 // Already in a session: the UI only offers Connect when idle, and
                 // replacing a live session's screen with an error would hide it.
                 Some(Command::Connect { .. }) => {}
+                // Arranging more than two screens is Pro; with one peer there is nothing to place.
+                Some(Command::Place { .. }) => {}
                 Some(Command::AnswerCode(matches)) => {
                     if let Some(tx) = shared.answer.lock().expect("answer lock").take() {
                         let _ = tx.send(matches);
@@ -504,7 +536,7 @@ fn dial<P: Platform + Clone + Sync>(
 /// Picks the paired nearby device to dial automatically: only those with a greater id
 /// than `me` (the lower id dials, so two devices never dial each other at once), not
 /// in `left` and not backing off. The lowest id wins, so the choice is deterministic.
-fn auto_target(
+pub fn auto_target(
     me: PeerId,
     nearby: &[NearbyDevice],
     retry_after: &BTreeMap<PeerId, Instant>,
@@ -665,12 +697,15 @@ async fn session<P: Platform + Clone + Sync>(
         );
     }
     let peer_id = s.peer;
-    let (peer, peer_os) = (s.peer_name.clone(), s.peer_os);
+    let peer = s.peer_name.clone();
     shared.set(
         generation,
         Phase::Connected {
-            peer: peer.clone(),
-            peer_os,
+            peers: vec![PeerView {
+                id: s.peer,
+                name: peer.clone(),
+                os: s.peer_os,
+            }],
             mode: Mode::Local,
         },
         Some(desk_view(&s, &shared.me.name)),
@@ -685,6 +720,7 @@ async fn session<P: Platform + Clone + Sync>(
             if let Phase::Connected { mode: m, .. } = &mut st.phase {
                 *m = mode;
             }
+            st.focus = focus(&st.phase, &st.desk);
         })
     };
     if run(s, shared.platform.capture(), shared.platform.clone(), on_mode).await == Ended::PeerLeft {
@@ -693,21 +729,28 @@ async fn session<P: Platform + Clone + Sync>(
     shared.set(generation, Phase::Lost { peer }, Some(Vec::new()));
 }
 
-/// Turns the session's Desk into screens named for people: this device's name for its
-/// own screen and the peer's name for the other.
+/// Which device's screen has the cursor: the peer being driven, else this device's own
+/// (it is local or is being driven). `None` unless connected.
+fn focus(phase: &Phase, desk: &[ScreenView]) -> Option<PeerId> {
+    match phase {
+        Phase::Connected {
+            mode: Mode::Driving(p), ..
+        } => Some(*p),
+        Phase::Connected { .. } => desk.iter().find(|d| d.me).map(|d| d.id),
+        _ => None,
+    }
+}
+
+/// Turns the session's Desk into screens named for people, looking each owner up among
+/// this device and its peers (an unknown owner falls back to its hex id).
 fn desk_view(s: &Session, my_name: &str) -> Vec<ScreenView> {
-    let name = |p: &PeerId| {
-        if *p == s.me {
-            my_name.to_string()
-        } else {
-            s.peer_name.clone()
-        }
-    };
+    let names = BTreeMap::from([(s.me, my_name.to_string()), (s.peer, s.peer_name.clone())]);
     s.desk
         .screens
         .iter()
         .map(|d| ScreenView {
-            name: name(&d.peer),
+            id: d.peer,
+            name: names.get(&d.peer).cloned().unwrap_or_else(|| hex(&d.peer)),
             x: d.x,
             y: d.y,
             w: d.w,
@@ -720,7 +763,7 @@ fn desk_view(s: &Session, my_name: &str) -> Vec<ScreenView> {
 /// Folds one network change into the devices heard so far: a device is kept by id, so
 /// re-announcing replaces it, and `Lost` removes it. The address is only a hint, since
 /// anyone can announce any id; it is verified against the pin when connecting.
-fn apply(found: &mut BTreeMap<PeerId, Nearby>, change: Change) {
+pub fn apply(found: &mut BTreeMap<PeerId, Nearby>, change: Change) {
     match change {
         Change::Found(n) => {
             found.insert(n.id, n);
@@ -733,7 +776,7 @@ fn apply(found: &mut BTreeMap<PeerId, Nearby>, change: Change) {
 
 /// The list the UI shows: sorted by name, each device marked paired when a pinned
 /// fingerprint starts with its id (a [`PeerId`] is a fingerprint's first 16 bytes).
-fn nearby_list(found: &BTreeMap<PeerId, Nearby>, pins: &BTreeSet<Fingerprint>) -> Vec<NearbyDevice> {
+pub fn nearby_list(found: &BTreeMap<PeerId, Nearby>, pins: &BTreeSet<Fingerprint>) -> Vec<NearbyDevice> {
     let paired: BTreeSet<PeerId> = pins.iter().map(peer_id).collect();
     let mut list: Vec<_> = found
         .values()

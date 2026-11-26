@@ -138,9 +138,10 @@ fn host_present() -> bool {
 /// The status line for a state: "Not connected", "Connected to {peer}", "Using {peer}"
 /// while driving, or "{peer} is using {this computer}" while driven.
 fn status_text(state: &AppState) -> String {
-    let Phase::Connected { peer, mode, .. } = &state.phase else {
+    let Phase::Connected { peers, mode } = &state.phase else {
         return "Not connected".into();
     };
+    let peer = peers.first().map_or("", |p| p.name.as_str());
     match mode {
         Mode::Local => format!("Connected to {peer}"),
         Mode::Driving(_) => format!("Using {peer}"),

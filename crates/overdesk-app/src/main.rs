@@ -603,7 +603,10 @@ impl App {
             .spacing(6)
             .align_x(Alignment::Center)
             .into(),
-            Phase::Connected { peer, peer_os, mode } => {
+            Phase::Connected { peers, mode } => {
+                let first = peers.first();
+                let peer = first.map_or("", |p| p.name.as_str());
+                let peer_os = first.map_or(Os::Windows, |p| p.os);
                 let status = match mode {
                     Mode::Local => format!("Cursor is on {me}"),
                     Mode::Driving(_) => format!("Cursor is on {peer}"),
@@ -618,6 +621,7 @@ impl App {
                     container(
                         canvas(desk::DeskMap {
                             screens: &state.desk,
+                            focus: state.focus,
                             mode: *mode,
                             phase: self.phase
                         })
@@ -632,10 +636,10 @@ impl App {
                     Space::new().height(18),
                     row![
                         column![
-                            text(peer.as_str()).font(bold()),
+                            text(peer).font(bold()),
                             row![
                                 text("●").size(11).color(style::TEAL),
-                                text(format!("{}, connected", os_word(*peer_os))).style(muted)
+                                text(format!("{}, connected", os_word(peer_os))).style(muted)
                             ]
                             .spacing(6)
                             .align_y(Alignment::Center),

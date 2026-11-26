@@ -13,7 +13,7 @@ use overdesk_net::session::Me;
 use overdesk_net::store::Store;
 use overdesk_net::transport::{Identity, Node};
 use overdesk_proto::{Os, PeerId};
-use overdeskd::controller::{AppState, Command, Config, Phase, spawn};
+use overdeskd::controller::{AppState, Command, Config, PeerView, Phase, spawn};
 use overdeskd::{Platform, Side};
 use tokio::sync::watch;
 
@@ -91,12 +91,15 @@ async fn pair_connect_and_lose_a_peer() {
     assert_eq!(
         sa.phase,
         Phase::Connected {
-            peer: "pc".into(),
-            peer_os: Os::Windows,
+            peers: vec![PeerView {
+                id: sa.desk.iter().find(|d| !d.me).unwrap().id,
+                name: "pc".into(),
+                os: Os::Windows,
+            }],
             mode: Mode::Local
         }
     );
-    assert!(matches!(sb.phase, Phase::Connected { ref peer, .. } if peer == "mac"));
+    assert!(matches!(sb.phase, Phase::Connected { ref peers, .. } if peers[0].name == "mac"));
     let names: Vec<_> = sa.desk.iter().map(|s| (s.name.as_str(), s.me, s.x)).collect();
     assert_eq!(
         names,
