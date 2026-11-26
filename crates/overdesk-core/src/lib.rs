@@ -220,12 +220,28 @@ pub enum DeskError {
 /// `known` says whether a peer is this device or one it has paired with.
 /// `Ok(None)` means "keep `current`".
 pub fn adopt(
-    _current: &Desk,
-    _incoming: Desk,
-    _sender: PeerId,
-    _known: impl Fn(&PeerId) -> bool,
+    current: &Desk,
+    incoming: Desk,
+    sender: PeerId,
+    known: impl Fn(&PeerId) -> bool,
 ) -> Result<Option<Desk>, DeskError> {
-    todo!()
+    if incoming.author != sender {
+        return Err(DeskError::NotAuthor);
+    }
+    if (incoming.version, incoming.author) <= (current.version, current.author) {
+        return Ok(None);
+    }
+    if incoming.version - current.version > MAX_VERSION_JUMP {
+        return Err(DeskError::VersionJump);
+    }
+    if incoming.screens.len() > MAX_SCREENS {
+        return Err(DeskError::TooManyScreens);
+    }
+    if let Some(s) = incoming.screens.iter().find(|s| !known(&s.peer)) {
+        return Err(DeskError::UnknownPeer(s.peer));
+    }
+    desk_layout(&incoming).map_err(DeskError::Layout)?;
+    Ok(Some(incoming))
 }
 
 /// A local edit: the new document outranks `current` on every peer.
