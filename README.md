@@ -7,15 +7,15 @@
 Slide your cursor off your Mac and keep working on your Windows PC,
 with input that feels native on both.
 
-[![CI](https://github.com/fkitsantas/Overdesk/actions/workflows/ci.yml/badge.svg)](https://github.com/fkitsantas/Overdesk/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![Commercial license](https://img.shields.io/badge/commercial-available-8A2BE2.svg)](COMMERCIAL.md)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg?logo=rust)](rust-toolchain.toml)
 ![Platforms](https://img.shields.io/badge/platforms-macOS%20·%20Windows%20·%20Linux%20·%20Android%20TV-lightgrey.svg)
 
 > [!WARNING]
-> **Pre-alpha.** The protocol and core logic exist and are tested. Nothing moves a real
-> cursor yet. Star or watch the repo to follow along.
+> **Pre-alpha.** Mac to Mac works today, hand-tested on real hardware: discovery, pairing,
+> crossing screens and the native Apple feel. Windows is built but not yet tested on a real
+> PC. There are no public downloads yet. Star or watch the repo to follow along.
 
 </div>
 
@@ -84,16 +84,16 @@ costs nothing until you use it.
 
 | Phase | What | Status |
 |---|---|---|
-| 0 | Workspace, CI on macOS / Windows / Linux, license checks, CLA | ✅ Done |
+| 0 | Workspace, local checks on macOS / Windows / Linux (no paid CI), license checks, CLA | ✅ Done |
 | 1 | Two-lane wire protocol and core logic: screen layout, edge switching, held keys, ⌘↔Ctrl remap | ✅ Done |
 | 2 | **macOS** capture and injection with native Magic Mouse / trackpad / keyboard feel | ✅ Built and hand-tested ([evidence](docs/tdd/macos-adapter.tdd.md)) |
 | 3 | QUIC lanes, 6-digit pairing, replicated Desk state, latency benchmark | ✅ Built and tested over loopback |
 | 3b | `overdeskd` daemon: Desk engine, saved pairings, failsafe escape chord. Hand-tested on a Mac ([evidence](docs/tdd/daemon.tdd.md)) | ✅ Done |
-| 3c | LAN discovery (no typing IP addresses) | 🔜 |
-| 4 | **Windows** capture and injection | 🔜 |
-| 5 | Desktop app in pure Rust (iced): Desk map, pairing, menu-bar / tray icon | ⏳ In progress |
+| 3c | LAN discovery over mDNS: nearby computers appear by name, no IP addresses | ✅ Built and hand-tested |
+| 4 | **Windows** capture and injection (low-level hooks, Raw Input, `SendInput`) | 🧪 Built; real-PC test pending |
+| 5 | Desktop app in pure Rust (iced): Desk map, pairing, menu-bar / tray icon, light and dark | ✅ Built and hand-tested on a Mac |
 | 6 | Linux (X11, then Wayland through libei) | 🔜 |
-| 7 | Signed per-user installers and **self-updates without admin rights** (built for managed corporate laptops), plus Overdesk Pro license keys | 🔜 |
+| 7 | Per-user installers, **signed self-updates without admin rights** (built for managed corporate laptops), device keys in Keychain / DPAPI, Overdesk Pro license keys | 🧪 Built; install-and-update test pending. Developer ID / Authenticode signing 🔜 |
 | 8 | Android TV client (Pro) | 🔭 Stretch |
 
 ## Architecture
@@ -112,7 +112,8 @@ flowchart LR
 | [`overdesk-core`](crates/overdesk-core) | Pure logic: layout validation, cursor focus across screen edges, held-key release, ⌘↔Ctrl remap |
 | [`overdesk-net`](crates/overdesk-net) | QUIC transport: mutual TLS 1.3 with device certificates, control stream and motion datagrams, 6-digit commit-reveal pairing, `Hello` identity checks |
 | [`overdeskd`](crates/overdeskd) | The daemon: wires capture, network and injection to the Desk engine (Local, Driving or Driven), pairing in the terminal |
-| [`overdesk-platform`](crates/overdesk-platform) | OS adapters. macOS: Quartz event tap and injection with real modifier flags, drag events, double-click counts and scroll momentum phases |
+| [`overdesk-platform`](crates/overdesk-platform) | OS adapters. macOS: Quartz event tap and injection with real modifier flags, drag events, double-click counts and scroll momentum phases. Windows: low-level hooks, Raw Input deltas and `SendInput` with scan codes |
+| [`overdesk-app`](crates/overdesk-app) | The desktop app (iced): nearby computers, pairing, the Desk map, tray icon and signed self-update |
 
 Read the full design in **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 
@@ -125,6 +126,18 @@ git clone https://github.com/fkitsantas/Overdesk.git
 cd Overdesk
 ./scripts/check.sh        # fmt, clippy, tests, licenses  (Windows: scripts\check.ps1)
 ```
+
+Run the desktop app on two computers on the same network. Each one lists the other under
+**Nearby**; pick it, check that both screens show the same 6-digit code, and you're sharing:
+
+```bash
+cargo run --release -p overdesk-app
+```
+
+Pair once. After that, the two computers find each other and reconnect on their own: after
+a restart, sleep, or a dropped Wi-Fi. Press **Disconnect** and they stay apart until you
+connect again. Installed copies open at login (per user, no admin rights); switch it off on
+the pairing screen or in the tray menu.
 
 On a Mac, try the input probe. First grant your terminal **Input Monitoring** and
 **Accessibility** in System Settings › Privacy & Security:

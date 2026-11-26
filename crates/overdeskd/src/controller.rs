@@ -7,18 +7,20 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use overdesk_core::engine::{Action, Mode};
 use overdesk_net::discovery::{Advertiser, Browser, Change, Nearby};
 use overdesk_net::pairing::{Fingerprint, peer_id};
 use overdesk_net::session::{Me, SessionError, pair};
 use overdesk_net::store::Store;
-use overdesk_net::transport::{Link, NetError, Node};
+use overdesk_net::transport::{Closer, Link, NetError, Node};
 use overdesk_proto::{Os, PeerId};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
-use crate::{DaemonError, Platform, Session, Side, establish, run};
+use crate::{DaemonError, Ended, Platform, Session, Side, establish, hex, run};
 
 /// What the controller needs to start: where to keep state, where to listen, and who
 /// this device is.
@@ -161,8 +163,35 @@ pub enum StartError {
     Bind(String),
 }
 
+/// How often the controller looks for a paired device to reconnect to.
+const AUTO_INTERVAL: Duration = Duration::from_secs(2);
+/// How long to leave a paired device alone after an ordinary failed automatic dial.
+const RETRY_AFTER: Duration = Duration::from_secs(5);
+/// How long after an automatic dial reached the wrong device (stale or spoofed mDNS).
+const RETRY_AFTER_UNEXPECTED: Duration = Duration::from_secs(60);
+/// The file in the store folder that remembers which side each peer's screen is on.
+const SIDES_FILE: &str = "sides.txt";
+
+/// An automatic dial's context: who it targets and the phase to return to if it fails,
+/// so a failed attempt never leaves an error screen.
+struct Auto {
+    /// The paired device being dialed.
+    peer: PeerId,
+    /// The phase the user was on before the attempt (`Idle` or `Lost`).
+    restore: Phase,
+}
+
 /// Everything a session task needs from the controller.
 struct Shared<P> {
+    /// The store folder, which also holds [`SIDES_FILE`].
+    dir: PathBuf,
+    /// Closes the running session's connection with a deliberate "bye".
+    closer: Mutex<Option<Closer>>,
+    /// Peers that disconnected on purpose; not redialed until they leave and reappear
+    /// on the network, or the user connects manually.
+    left: Mutex<BTreeSet<PeerId>>,
+    /// Earliest time an automatic dial to a peer may be retried after a failure.
+    retry_after: Mutex<BTreeMap<PeerId, Instant>>,
     /// Publishes [`AppState`] to the UI.
     state: watch::Sender<AppState>,
     /// Where the user's answer to the current pairing code goes.
@@ -250,6 +279,10 @@ pub async fn spawn<P: Platform + Clone + Sync>(
     });
     let shared = Arc::new(Shared {
         state,
+        dir: config.store_dir.clone(),
+        closer: Mutex::new(None),
+        left: Mutex::new(BTreeSet::new()),
+        retry_after: Mutex::new(BTreeMap::new()),
         answer: Mutex::new(None),
         pairing_until: Mutex::new(None),
         generation: AtomicU64::new(0),
@@ -268,6 +301,10 @@ pub async fn spawn<P: Platform + Clone + Sync>(
         // Ends when the browser drops with the controller and closes the channel.
         std::thread::spawn(move || {
             while let Ok(change) = changes.recv() {
+                if let Change::Lost(id) = &change {
+                    // Gone from the network: a later reappearance is a fresh start.
+                    shared.left.lock().expect("left lock").remove(id);
+                }
                 apply(&mut shared.found.lock().expect("found lock"), change);
                 shared.refresh_nearby();
             }
@@ -276,7 +313,7 @@ pub async fn spawn<P: Platform + Clone + Sync>(
     });
     let (commands, rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
-        control(Arc::new(node), shared, rx).await;
+        control(Arc::new(node), shared, rx, peer_id(&identity.fingerprint())).await;
         drop(discovery); // announced and browsing for exactly as long as the controller runs
     });
     Ok((commands, state_rx))
@@ -288,6 +325,7 @@ async fn control<P: Platform + Clone + Sync>(
     node: Arc<Node>,
     shared: Arc<Shared<P>>,
     mut commands: mpsc::UnboundedReceiver<Command>,
+    my_id: PeerId,
 ) {
     // shortcut: one session at a time (Free tier: 2 devices); Pro runs one per peer.
     let mut active: Option<JoinHandle<()>> = None;
@@ -295,18 +333,38 @@ async fn control<P: Platform + Clone + Sync>(
     let busy = |a: &Option<JoinHandle<()>>| a.as_ref().is_some_and(|h| !h.is_finished());
     // Inbound links that passed setup and the pin or pairing-window check, awaiting a claim.
     let (claims_tx, mut claims) = mpsc::unbounded_channel::<Link>();
+    // Set by a local Disconnect; only a manual Connect lifts it.
+    let mut suppressed = false;
+    let mut tick = tokio::time::interval(AUTO_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
+            _ = tick.tick() => {
+                let (phase, nearby) = {
+                    let s = shared.state.borrow();
+                    (s.phase.clone(), s.nearby.clone())
+                };
+                if !busy(&active) && !suppressed && matches!(phase, Phase::Idle | Phase::Lost { .. }) {
+                    let target = auto_target(
+                        my_id,
+                        &nearby,
+                        &shared.retry_after.lock().expect("retry lock"),
+                        &shared.left.lock().expect("left lock"),
+                        Instant::now(),
+                    );
+                    if let Some(t) = target {
+                        let side = load_side(&shared.dir, &t.id);
+                        let auto = Auto { peer: t.id, restore: phase };
+                        active = Some(dial(&node, &shared, t.address, side, Some(t.id), Some(auto)));
+                    }
+                }
+            }
             cmd = commands.recv() => match cmd {
                 None => break,
                 Some(Command::Connect { address, side, expect }) if !busy(&active) => {
-                    let generation = shared.begin(Phase::Connecting { address });
-                    // Dial inside the task: a slow peer must not block Disconnect.
-                    let (node, shared) = (node.clone(), shared.clone());
-                    active = Some(tokio::spawn(async move {
-                        let link = node.connect(address).await;
-                        session(shared, generation, link, side, false, expect).await;
-                    }));
+                    suppressed = false;
+                    shared.left.lock().expect("left lock").clear();
+                    active = Some(dial(&node, &shared, address, side, expect, None));
                 }
                 // Already in a session: the UI only offers Connect when idle, and
                 // replacing a live session's screen with an error would hide it.
@@ -331,6 +389,11 @@ async fn control<P: Platform + Clone + Sync>(
                     }
                 }
                 Some(Command::Disconnect) => {
+                    suppressed = true;
+                    // Tell the peer this is deliberate, so it does not redial us.
+                    if let Some(closer) = shared.closer.lock().expect("closer lock").take() {
+                        closer.leave();
+                    }
                     if let Some(task) = active.take() {
                         task.abort();
                         // An aborted session cannot clean up after itself.
@@ -365,10 +428,74 @@ async fn control<P: Platform + Clone + Sync>(
                 let shared = shared.clone();
                 // The listener's side is decided by the dialer's Desk.
                 active = Some(tokio::spawn(async move {
-                    session(shared, generation, Ok(link), Side::Right, true, None).await;
+                    session(shared, generation, Ok(link), Side::Right, true, None, None).await;
                 }));
             }
         }
+    }
+}
+
+/// Starts a dial in its own task, so a slow peer never blocks Disconnect. `auto` marks
+/// an automatic reconnect, whose failures are silent.
+fn dial<P: Platform + Clone + Sync>(
+    node: &Arc<Node>,
+    shared: &Arc<Shared<P>>,
+    address: SocketAddr,
+    side: Side,
+    expect: Option<PeerId>,
+    auto: Option<Auto>,
+) -> JoinHandle<()> {
+    let generation = shared.begin(Phase::Connecting { address });
+    let (node, shared) = (node.clone(), shared.clone());
+    tokio::spawn(async move {
+        let link = node.connect(address).await;
+        session(shared, generation, link, side, false, expect, auto).await;
+    })
+}
+
+/// Picks the paired nearby device to dial automatically: only those with a greater id
+/// than `me` (the lower id dials, so two devices never dial each other at once), not
+/// in `left` and not backing off. The lowest id wins, so the choice is deterministic.
+fn auto_target(
+    me: PeerId,
+    nearby: &[NearbyDevice],
+    retry_after: &BTreeMap<PeerId, Instant>,
+    left: &BTreeSet<PeerId>,
+    now: Instant,
+) -> Option<NearbyDevice> {
+    nearby
+        .iter()
+        .filter(|d| d.paired && d.id > me && !left.contains(&d.id))
+        .filter(|d| retry_after.get(&d.id).is_none_or(|t| now >= *t))
+        .min_by_key(|d| d.id)
+        .cloned()
+}
+
+/// The saved side of `peer`'s screen, `Right` if none was saved or the file is unreadable.
+fn load_side(dir: &std::path::Path, peer: &PeerId) -> Side {
+    let key = hex(peer);
+    let text = std::fs::read_to_string(dir.join(SIDES_FILE)).unwrap_or_default();
+    let found = text
+        .lines()
+        .find_map(|l| l.strip_prefix(key.as_str())?.strip_prefix(' '));
+    if found == Some("left") { Side::Left } else { Side::Right }
+}
+
+/// Remembers `side` for `peer`: rewrites the file via a temp file and rename, so a crash
+/// never leaves it half-written. Best effort; losing it only costs the default side.
+fn save_side(dir: &std::path::Path, peer: &PeerId, side: Side) {
+    let key = hex(peer);
+    let path = dir.join(SIDES_FILE);
+    let old = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut text: String = old
+        .lines()
+        .filter(|l| !l.starts_with(key.as_str()))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    text += &format!("{key} {}\n", if side == Side::Left { "left" } else { "right" });
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
     }
 }
 
@@ -376,6 +503,8 @@ async fn control<P: Platform + Clone + Sync>(
 /// `inbound` connections from unknown devices pair only while pairing is open, and
 /// all state writes are dropped once `generation` is stale. A dial with `expect` set
 /// connects only to a pinned peer with that id and never falls back to pairing.
+/// An `auto` dial that fails restores the previous phase and backs off instead of
+/// showing an error.
 async fn session<P: Platform + Clone + Sync>(
     shared: Arc<Shared<P>>,
     generation: u64,
@@ -383,12 +512,25 @@ async fn session<P: Platform + Clone + Sync>(
     side: Side,
     inbound: bool,
     expect: Option<PeerId>,
+    auto: Option<Auto>,
 ) {
+    // Reports a failed dial: an error screen, or for an automatic one a quiet retreat.
+    let fail = |msg: String, wait: Duration| match &auto {
+        None => shared.set(generation, Phase::Error(msg), None),
+        Some(a) => {
+            shared
+                .retry_after
+                .lock()
+                .expect("retry lock")
+                .insert(a.peer, Instant::now() + wait);
+            shared.set(generation, a.restore.clone(), None);
+        }
+    };
     let mut link = match link {
         Ok(l) => l,
         // Only dials this device made are worth an error screen.
         Err(_) if inbound => return,
-        Err(e) => return shared.set(generation, Phase::Error(format!("Couldn't connect: {e}")), None),
+        Err(e) => return fail(format!("Couldn't connect: {e}"), RETRY_AFTER),
     };
     let peer_fp = link.peer_fingerprint();
     if let Some(id) = expect
@@ -396,10 +538,9 @@ async fn session<P: Platform + Clone + Sync>(
     {
         // Someone else answered at the announced address: never offer to pair with them.
         link.close("unexpected peer");
-        return shared.set(
-            generation,
-            Phase::Error("This isn't the computer you paired with. Pair it again if it was reset.".into()),
-            None,
+        return fail(
+            "This isn't the computer you paired with. Pair it again if it was reset.".into(),
+            RETRY_AFTER_UNEXPECTED,
         );
     }
     // An unknown device: pairing is the only way in.
@@ -453,10 +594,21 @@ async fn session<P: Platform + Clone + Sync>(
     let s = match establish(link, |fp| pins.contains(fp), &shared.me, side).await {
         Ok(s) => s,
         Err(DaemonError::Session(SessionError::Net(e))) => {
-            return shared.set(generation, Phase::Error(format!("Connection dropped: {e}")), None);
+            return fail(format!("Connection dropped: {e}"), RETRY_AFTER);
         }
-        Err(e) => return shared.set(generation, Phase::Error(format!("Couldn't set up the Desk: {e}")), None),
+        Err(e) => return fail(format!("Couldn't set up the Desk: {e}"), RETRY_AFTER),
     };
+    *shared.closer.lock().expect("closer lock") = Some(s.tx.closer());
+    // Remember which side the peer's screen is on, for automatic reconnects.
+    let x = |p: PeerId| s.desk.screens.iter().find(|d| d.peer == p).map(|d| d.x);
+    if let (Some(mine), Some(theirs)) = (x(s.me), x(s.peer)) {
+        save_side(
+            &shared.dir,
+            &s.peer,
+            if theirs > mine { Side::Right } else { Side::Left },
+        );
+    }
+    let peer_id = s.peer;
     let (peer, peer_os) = (s.peer_name.clone(), s.peer_os);
     shared.set(
         generation,
@@ -479,7 +631,9 @@ async fn session<P: Platform + Clone + Sync>(
             }
         })
     };
-    run(s, shared.platform.capture(), shared.platform.clone(), on_mode).await;
+    if run(s, shared.platform.capture(), shared.platform.clone(), on_mode).await == Ended::PeerLeft {
+        shared.left.lock().expect("left lock").insert(peer_id);
+    }
     shared.set(generation, Phase::Lost { peer }, Some(Vec::new()));
 }
 
@@ -551,6 +705,56 @@ mod tests {
             os: Os::Windows,
             address: SocketAddr::from(([10, 0, 0, n], 24801)),
         }
+    }
+
+    /// A nearby device with a one-byte id.
+    fn dev(n: u8, paired: bool) -> NearbyDevice {
+        NearbyDevice {
+            name: format!("D{n}"),
+            os: Os::Windows,
+            address: SocketAddr::from(([10, 0, 0, n], 24801)),
+            id: PeerId([n; 16]),
+            paired,
+        }
+    }
+
+    #[test]
+    fn only_the_lower_id_dials_a_paired_device() {
+        let (none, left, now) = (BTreeMap::new(), BTreeSet::new(), Instant::now());
+        let nearby = [dev(1, true), dev(5, false), dev(7, true), dev(9, true)];
+        // Lowest greater paired id; the unpaired 5 and the lower 1 are skipped.
+        let t = auto_target(PeerId([3; 16]), &nearby, &none, &left, now);
+        assert_eq!(t.map(|d| d.id), Some(PeerId([7; 16])));
+        // The higher side never dials.
+        assert!(auto_target(PeerId([9; 16]), &nearby, &none, &left, now).is_none());
+    }
+
+    #[test]
+    fn backoff_and_left_peers_are_skipped() {
+        let now = Instant::now();
+        let nearby = [dev(7, true), dev(9, true)];
+        let me = PeerId([3; 16]);
+        let retry = BTreeMap::from([(PeerId([7; 16]), now + Duration::from_secs(5))]);
+        let t = auto_target(me, &nearby, &retry, &BTreeSet::new(), now);
+        assert_eq!(t.map(|d| d.id), Some(PeerId([9; 16])));
+        // Once the backoff has passed it is eligible again.
+        let t = auto_target(me, &nearby, &retry, &BTreeSet::new(), now + Duration::from_secs(5));
+        assert_eq!(t.map(|d| d.id), Some(PeerId([7; 16])));
+        let left = BTreeSet::from([PeerId([7; 16]), PeerId([9; 16])]);
+        assert!(auto_target(me, &nearby, &BTreeMap::new(), &left, now).is_none());
+    }
+
+    #[test]
+    fn sides_round_trip_per_peer() {
+        let dir = std::env::temp_dir().join(format!("overdesk-sides-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (PeerId([1; 16]), PeerId([2; 16]));
+        assert_eq!(load_side(&dir, &a), Side::Right);
+        save_side(&dir, &a, Side::Left);
+        save_side(&dir, &b, Side::Right);
+        save_side(&dir, &b, Side::Left);
+        assert_eq!((load_side(&dir, &a), load_side(&dir, &b)), (Side::Left, Side::Left));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

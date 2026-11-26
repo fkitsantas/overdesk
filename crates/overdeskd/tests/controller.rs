@@ -104,6 +104,12 @@ async fn pair_connect_and_lose_a_peer() {
         "Desk uses device names, PC on the right"
     );
 
+    // The dialer remembers where the peer's screen sits, for automatic reconnects.
+    // (`store()` would wipe the folder, so rebuild its path by hand.)
+    let dir = std::env::temp_dir().join(format!("overdesk-ctl-mac-{}", std::process::id()));
+    let sides = std::fs::read_to_string(dir.join("sides.txt")).unwrap();
+    assert!(sides.trim_end().ends_with(" right"), "saved side: {sides:?}");
+
     a_cmd.send(Command::Disconnect).unwrap();
     wait(&mut a, "A idle", |p| *p == Phase::Idle).await;
     wait(&mut b, "B lost", |p| matches!(p, Phase::Lost { peer } if peer == "mac")).await;

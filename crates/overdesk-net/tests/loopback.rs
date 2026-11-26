@@ -170,8 +170,20 @@ async fn motion_datagrams_arrive() {
 async fn peer_going_away_is_noticed() {
     within(async {
         let mut p = trusted().await;
-        p.dialer.close("bye");
+        p.dialer.close("gone");
         assert!(matches!(p.listener.recv_control().await, Err(NetError::Closed(_))));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_deliberate_leave_is_told_apart_from_a_lost_link() {
+    within(async {
+        let p = trusted().await;
+        let (tx, _rx) = p.dialer.split().unwrap();
+        tx.closer().leave();
+        let (_tx, mut rx) = p.listener.split().unwrap();
+        assert!(matches!(rx.recv_control().await, Err(NetError::PeerLeft)));
     })
     .await;
 }

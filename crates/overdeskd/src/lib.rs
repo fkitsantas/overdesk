@@ -8,6 +8,8 @@ pub mod controller;
 pub mod native;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use overdesk_core::adopt;
@@ -170,14 +172,23 @@ impl Drop for Tasks {
     }
 }
 
+/// Why a session ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ended {
+    /// The peer disconnected on purpose; do not dial it again until it reappears.
+    PeerLeft,
+    /// The link was lost (network, sleep, crash); reconnecting is worthwhile.
+    Lost,
+}
+
 /// Runs a session until the peer is lost. Leaves the platform safe: not swallowing,
-/// nothing held. `on_mode` hears every cursor-mode change.
+/// nothing held. `on_mode` hears every cursor-mode change. Returns why it ended.
 pub async fn run(
     session: Session,
     mut local: UnboundedReceiver<Captured>,
     platform: impl Platform,
     mut on_mode: impl FnMut(Mode) + Send,
-) {
+) -> Ended {
     let Session {
         mut engine,
         mut tx,
@@ -188,13 +199,18 @@ pub async fn run(
     // Every source feeds one queue, so the engine sees all events in a single order.
     let (events, mut queue) = unbounded_channel::<Event>();
     let motion = rx.motion();
+    let left = Arc::new(AtomicBool::new(false));
+    let left_in_reader = left.clone();
     let (control_ev, motion_ev, local_ev) = (events.clone(), events.clone(), events);
     let _tasks = Tasks(vec![
         tokio::spawn(async move {
             loop {
                 let event = match rx.recv_control().await {
                     Ok(msg) => Event::Peer { from: peer, msg },
-                    Err(_) => Event::PeerLost(peer),
+                    Err(e) => {
+                        left_in_reader.store(matches!(e, NetError::PeerLeft), Ordering::SeqCst);
+                        Event::PeerLost(peer)
+                    }
                 };
                 // After a loss there is nothing more to read; the engine needs `PeerLost` only once.
                 let lost = matches!(event, Event::PeerLost(_));
@@ -239,7 +255,7 @@ pub async fn run(
             match action {
                 // shortcut: one peer per session (Free tier: 2 devices); route by `to` for Pro.
                 Action::Send { msg, .. } => {
-                    if let Err(NetError::Closed(_)) = tx.send_control(&msg).await {
+                    if let Err(NetError::Closed(_) | NetError::PeerLeft) = tx.send_control(&msg).await {
                         break;
                     }
                 }
@@ -258,6 +274,11 @@ pub async fn run(
     // Whatever happened, leave this device usable.
     platform.swallow(false);
     platform.inject(Action::ReleaseAll);
+    if left.load(Ordering::SeqCst) {
+        Ended::PeerLeft
+    } else {
+        Ended::Lost
+    }
 }
 
 /// Platform capture event to engine event.

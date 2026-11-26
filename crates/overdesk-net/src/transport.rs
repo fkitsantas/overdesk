@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use overdesk_proto::{Control, FrameError, MAX_FRAME_LEN, Motion, Pairing, decode_motion, encode_frame, encode_motion};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use quinn::{Connection, Endpoint, RecvStream, SendStream, TransportConfig};
+use quinn::{Connection, ConnectionError, Endpoint, RecvStream, SendStream, TransportConfig};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
@@ -51,6 +51,10 @@ pub enum NetError {
     /// string carries the underlying reason for logs.
     #[error("connection closed: {0}")]
     Closed(String),
+    /// The peer closed the connection on purpose (see [`Closer::leave`]), as opposed to
+    /// being lost to a timeout or the network.
+    #[error("peer disconnected")]
+    PeerLeft,
     /// A frame could not be encoded or decoded, or exceeded its size limit.
     #[error(transparent)]
     Frame(#[from] FrameError),
@@ -80,6 +84,29 @@ fn io(e: impl std::fmt::Display) -> NetError {
 /// Wraps any displayable error as [`NetError::Closed`], for use with `map_err`.
 fn closed(e: impl std::fmt::Display) -> NetError {
     NetError::Closed(e.to_string())
+}
+
+/// The application close reason sent by [`Closer::leave`].
+const LEAVE_REASON: &[u8] = b"bye";
+
+/// Like [`closed`], but recognises a deliberate close by the peer.
+fn closed_on(conn: &Connection, e: impl std::fmt::Display) -> NetError {
+    match conn.close_reason() {
+        Some(ConnectionError::ApplicationClosed(c)) if c.reason == LEAVE_REASON => NetError::PeerLeft,
+        _ => closed(e),
+    }
+}
+
+/// A handle that can close a running link from outside its tasks.
+#[derive(Clone)]
+pub struct Closer(Connection);
+
+impl Closer {
+    /// Closes the connection with the "bye" reason, so the peer sees a deliberate
+    /// disconnect ([`NetError::PeerLeft`]) rather than a lost link.
+    pub fn leave(&self) {
+        self.0.close(0u32.into(), LEAVE_REASON);
+    }
 }
 
 /// This device's long-lived certificate and private key.
@@ -626,7 +653,7 @@ async fn read_frame<T: DeserializeOwned>(
     max_len: usize,
 ) -> Result<T, NetError> {
     let mut len = [0u8; 4];
-    recv.read_exact(&mut len).await.map_err(closed)?;
+    recv.read_exact(&mut len).await.map_err(|e| closed_on(conn, e))?;
     let n = u32::from_be_bytes(len) as usize;
     if n > max_len {
         conn.close(0u32.into(), b"frame too large");
@@ -635,7 +662,7 @@ async fn read_frame<T: DeserializeOwned>(
     let mut frame = len.to_vec();
     while frame.len() < 4 + n {
         let want = 4 + n - frame.len();
-        let chunk = recv.read_chunk(want, true).await.map_err(closed)?;
+        let chunk = recv.read_chunk(want, true).await.map_err(|e| closed_on(conn, e))?;
         let chunk = chunk.ok_or_else(|| closed("stream ended mid-frame"))?;
         frame.extend_from_slice(&chunk.bytes);
     }
@@ -673,6 +700,11 @@ impl LinkTx {
     /// Returns [`NetError::Closed`] if the datagram cannot be sent.
     pub fn send_motion(&self, m: &Motion) -> Result<(), NetError> {
         self.conn.send_datagram(encode_motion(m).into()).map_err(closed)
+    }
+
+    /// A handle that can close this link from another task.
+    pub fn closer(&self) -> Closer {
+        Closer(self.conn.clone())
     }
 
     /// Closes the whole connection, which also ends the reader half.
