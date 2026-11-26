@@ -36,12 +36,32 @@ pub fn state(which: &str) -> (AppState, Option<(bool, bool)>) {
             me: false,
         },
     ];
+    let third = PeerId([5; 16]);
+    let mut peers = vec![PeerView {
+        id: peer,
+        name: "DESKTOP-7Q2K4LM".into(),
+        os: Os::Windows,
+    }];
+    let mut desk = desk;
+    if which == "three" {
+        // A Linux laptop below the MacBook, as a third computer.
+        peers.push(PeerView {
+            id: third,
+            name: "fedora".into(),
+            os: Os::Linux,
+        });
+        desk.push(ScreenView {
+            id: third,
+            name: "fedora".into(),
+            x: 0,
+            y: 2160,
+            w: 1920,
+            h: 1080,
+            me: false,
+        });
+    }
     let connected = |mode| Phase::Connected {
-        peers: vec![PeerView {
-            id: peer,
-            name: "DESKTOP-7Q2K4LM".into(),
-            os: Os::Windows,
-        }],
+        peers: peers.clone(),
         mode,
     };
     let (phase, desk, perms) = match which {
@@ -49,6 +69,7 @@ pub fn state(which: &str) -> (AppState, Option<(bool, bool)>) {
         "connecting" => (Phase::Connecting { address: "192.168.1.50:24801".parse().unwrap() }, vec![], None),
         "pairing" => (Phase::Pairing { peer: "192.168.1.50".into(), code: 382930 }, vec![], None),
         "local" => (connected(Mode::Local), desk, None),
+        "three" => (connected(Mode::Driving(peer)), desk, None),
         "driving" => (connected(Mode::Driving(peer)), desk, None),
         "driven" => (connected(Mode::Driven(peer)), desk, None),
         "lost" => (Phase::Lost { peer: "DESKTOP-7Q2K4LM".into() }, vec![], None),
@@ -62,7 +83,8 @@ pub fn state(which: &str) -> (AppState, Option<(bool, bool)>) {
         phase,
         desk,
         // The cursor is on the peer only while this device drives it.
-        focus: matches!(which, "local" | "driving" | "driven").then_some(if which == "driving" { peer } else { me }),
+        focus: matches!(which, "local" | "driving" | "driven" | "three")
+            .then_some(if matches!(which, "driving" | "three") { peer } else { me }),
         can_arrange: false,
         pairing_open: which == "pairing-open",
         nearby: if which == "idle" {
