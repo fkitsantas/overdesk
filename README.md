@@ -92,7 +92,7 @@ private never leave the computer. Images and files come with Pro.
 | 3c | LAN discovery over mDNS: nearby computers appear by name, no IP addresses | ✅ Built and hand-tested |
 | 4 | **Windows** capture and injection (low-level hooks, Raw Input, `SendInput`) | 🧪 Built; real-PC test pending |
 | 5 | Desktop app in pure Rust (iced): Desk map, pairing, menu-bar / tray icon, light and dark | ✅ Built and hand-tested on a Mac |
-| 6 | **Linux**: X11 (XInput2 capture, XTest injection), then Wayland through the desktop portals (libei) | ⏳ In progress: builds on Linux; X11 adapter underway |
+| 6 | **Linux**: X11 (XInput2 capture, XTest injection), then Wayland through the desktop portals (libei) | 🧪 X11 built (tested on a virtual display); app, tray, AppImage and .deb built; real-desktop test pending. Wayland designed ([docs/WAYLAND.md](docs/WAYLAND.md)) 🔜 |
 | 7 | Per-user installers, **signed self-updates without admin rights** (built for managed corporate laptops) with automatic rollback of an update that fails to start (macOS), device keys in Keychain / DPAPI, Overdesk Pro license keys | 🧪 Built; install-and-update test pending. Developer ID / Authenticode signing 🔜 |
 | 8 | Android TV client (Pro) | 🔭 Stretch |
 
@@ -112,7 +112,7 @@ flowchart LR
 | [`overdesk-core`](crates/overdesk-core) | Pure logic: layout validation, cursor focus across screen edges, held-key release, ⌘↔Ctrl remap |
 | [`overdesk-net`](crates/overdesk-net) | QUIC transport: mutual TLS 1.3 with device certificates, control stream and motion datagrams, 6-digit commit-reveal pairing, `Hello` identity checks |
 | [`overdeskd`](crates/overdeskd) | The daemon: wires capture, network and injection to the Desk engine (Local, Driving or Driven), pairing in the terminal |
-| [`overdesk-platform`](crates/overdesk-platform) | OS adapters. macOS: Quartz event tap and injection with real modifier flags, drag events, double-click counts and scroll momentum phases. Windows: low-level hooks, Raw Input deltas and `SendInput` with scan codes |
+| [`overdesk-platform`](crates/overdesk-platform) | OS adapters. macOS: Quartz event tap and injection with real modifier flags, drag events, double-click counts and scroll momentum phases. Windows: low-level hooks, Raw Input deltas and `SendInput` with scan codes. Linux (X11): XInput2 raw capture and XTest injection |
 | [`overdesk-app`](crates/overdesk-app) | The desktop app (iced): nearby computers, pairing, the Desk map, tray icon and signed self-update |
 
 Read the full design in **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
