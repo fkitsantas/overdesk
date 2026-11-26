@@ -198,14 +198,34 @@ pub fn desk_layout(desk: &Desk) -> Result<Layout, LayoutError> {
     )
 }
 
-/// Decides whether `incoming` replaces `current`: the higher `(version, author)` wins,
-/// and only if it describes a valid layout. `Ok(None)` means "keep `current`".
-pub fn adopt(current: &Desk, incoming: Desk) -> Result<Option<Desk>, LayoutError> {
-    if (incoming.version, incoming.author) <= (current.version, current.author) {
-        return Ok(None);
-    }
-    desk_layout(&incoming)?;
-    Ok(Some(incoming))
+/// More screens than any real desk; bounds the O(n²) overlap check on peer input.
+pub const MAX_SCREENS: usize = 64;
+/// Honest peers bump the version by one per edit, so a bigger jump is hostile or
+/// broken; it would otherwise let one peer saturate the version and lock out edits.
+pub const MAX_VERSION_JUMP: u64 = 1 << 20;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum DeskError {
+    Layout(LayoutError),
+    /// The document's `author` is not the authenticated peer that sent it.
+    NotAuthor,
+    VersionJump,
+    TooManyScreens,
+    /// A screen belongs to a peer this device has not paired with.
+    UnknownPeer(PeerId),
+}
+
+/// Decides whether `incoming`, received from the authenticated peer `sender`, replaces
+/// `current`: the higher `(version, author)` wins, and only if it is well-formed.
+/// `known` says whether a peer is this device or one it has paired with.
+/// `Ok(None)` means "keep `current`".
+pub fn adopt(
+    _current: &Desk,
+    _incoming: Desk,
+    _sender: PeerId,
+    _known: impl Fn(&PeerId) -> bool,
+) -> Result<Option<Desk>, DeskError> {
+    todo!()
 }
 
 /// A local edit: the new document outranks `current` on every peer.
@@ -451,6 +471,12 @@ mod tests {
         }
     }
 
+    /// Adopts as if the document's own author sent it and every peer is known.
+    fn take(cur: &Desk, incoming: Desk) -> Result<Option<Desk>, DeskError> {
+        let sender = incoming.author;
+        adopt(cur, incoming, sender, |_| true)
+    }
+
     fn ds(name: &str, x: i32) -> DeskScreen {
         DeskScreen {
             peer: PeerId([0; 16]),
@@ -466,17 +492,17 @@ mod tests {
     fn newer_desk_wins_older_is_ignored() {
         let cur = desk(5, 1, vec![ds("a", 0)]);
         let newer = desk(6, 0, vec![ds("a", 0), ds("b", 100)]);
-        assert_eq!(adopt(&cur, newer.clone()), Ok(Some(newer)));
-        assert_eq!(adopt(&cur, desk(4, 9, vec![ds("a", 0)])), Ok(None));
-        assert_eq!(adopt(&cur, cur.clone()), Ok(None), "same document");
+        assert_eq!(take(&cur, newer.clone()), Ok(Some(newer)));
+        assert_eq!(take(&cur, desk(4, 9, vec![ds("a", 0)])), Ok(None));
+        assert_eq!(take(&cur, cur.clone()), Ok(None), "same document");
     }
 
     #[test]
     fn equal_versions_break_ties_by_author() {
         let cur = desk(5, 1, vec![ds("a", 0)]);
         let higher = desk(5, 2, vec![ds("b", 0)]);
-        assert_eq!(adopt(&cur, higher.clone()), Ok(Some(higher)));
-        assert_eq!(adopt(&cur, desk(5, 0, vec![ds("c", 0)])), Ok(None));
+        assert_eq!(take(&cur, higher.clone()), Ok(Some(higher)));
+        assert_eq!(take(&cur, desk(5, 0, vec![ds("c", 0)])), Ok(None));
     }
 
     #[test]
@@ -484,8 +510,8 @@ mod tests {
         let cur = desk(1, 1, vec![ds("a", 0)]);
         let overlapping = desk(9, 1, vec![ds("a", 0), ds("b", 50)]);
         assert_eq!(
-            adopt(&cur, overlapping),
-            Err(LayoutError::Overlap("a".into(), "b".into()))
+            take(&cur, overlapping),
+            Err(DeskError::Layout(LayoutError::Overlap("a".into(), "b".into())))
         );
     }
 
@@ -494,8 +520,52 @@ mod tests {
         let cur = desk(7, 200, vec![ds("a", 0)]);
         let mine = edit(&cur, PeerId([1; 16]), vec![ds("a", 0), ds("b", 100)]);
         assert_eq!((mine.version, mine.author), (8, PeerId([1; 16])));
-        assert_eq!(adopt(&cur, mine.clone()), Ok(Some(mine)));
+        assert_eq!(take(&cur, mine.clone()), Ok(Some(mine)));
         let maxed = desk(u64::MAX, 0, vec![ds("a", 0)]);
         assert_eq!(edit(&maxed, PeerId([1; 16]), vec![]).version, u64::MAX);
+    }
+
+    #[test]
+    fn desk_must_come_from_its_author() {
+        let cur = desk(1, 1, vec![ds("a", 0)]);
+        let forged = desk(2, 9, vec![ds("a", 0)]);
+        assert_eq!(
+            adopt(&cur, forged, PeerId([3; 16]), |_| true),
+            Err(DeskError::NotAuthor)
+        );
+    }
+
+    #[test]
+    fn huge_version_jump_is_rejected() {
+        let cur = desk(10, 1, vec![ds("a", 0)]);
+        assert_eq!(
+            take(&cur, desk(u64::MAX, 2, vec![ds("a", 0)])),
+            Err(DeskError::VersionJump)
+        );
+        assert!(
+            take(&cur, desk(10 + MAX_VERSION_JUMP, 2, vec![ds("a", 0)]))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn too_many_screens_is_rejected_before_layout_check() {
+        let cur = desk(1, 1, vec![ds("a", 0)]);
+        let screens = (0..=MAX_SCREENS as i32).map(|i| ds(&i.to_string(), i * 100)).collect();
+        assert_eq!(take(&cur, desk(2, 1, screens)), Err(DeskError::TooManyScreens));
+    }
+
+    #[test]
+    fn screens_of_unknown_peers_are_rejected() {
+        let cur = desk(1, 1, vec![ds("a", 0)]);
+        let mut stranger = ds("b", 100);
+        stranger.peer = PeerId([0xEE; 16]);
+        let incoming = desk(2, 1, vec![ds("a", 0), stranger]);
+        let known = |p: &PeerId| *p != PeerId([0xEE; 16]);
+        assert_eq!(
+            adopt(&cur, incoming, PeerId([1; 16]), known),
+            Err(DeskError::UnknownPeer(PeerId([0xEE; 16])))
+        );
     }
 }
