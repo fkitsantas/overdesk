@@ -5,6 +5,41 @@ use std::collections::BTreeSet;
 
 use overdesk_proto::{Button, Phase, ScrollUnit};
 
+/// A monitor or desktop rectangle in OS global pixels: `(x, y, width, height)`.
+pub type Rect = (i32, i32, u32, u32);
+
+/// The bounding box of `rects`, or `None` when there are none. This is a device's
+/// "screen" on the Desk: capture reports positions relative to its origin and injection
+/// adds the origin back, so OS origins may be negative.
+///
+/// shortcut: parts of the box covered by no monitor (an L-shaped layout) are
+/// unreachable, so the cursor only crosses where a monitor touches the box edge; model
+/// per-monitor screens on the Desk if that matters.
+pub fn bounding_box(rects: impl IntoIterator<Item = Rect>) -> Option<Rect> {
+    rects.into_iter().fold(None, |acc, (x, y, w, h)| {
+        let (r, b) = (i64::from(x) + i64::from(w), i64::from(y) + i64::from(h));
+        let Some((ax, ay, aw, ah)) = acc else {
+            return Some((x, y, w, h));
+        };
+        let (nx, ny) = (ax.min(x), ay.min(y));
+        let (nr, nb) = (
+            r.max(i64::from(ax) + i64::from(aw)),
+            b.max(i64::from(ay) + i64::from(ah)),
+        );
+        Some((nx, ny, (nr - i64::from(nx)) as u32, (nb - i64::from(ny)) as u32))
+    })
+}
+
+/// Global OS coordinates to box-relative ones (`origin` is the box's top-left).
+pub fn to_local(global: i32, origin: i32) -> i32 {
+    global.saturating_sub(origin)
+}
+
+/// Box-relative coordinates back to global OS ones.
+pub fn to_global(local: i32, origin: i32) -> i32 {
+    local.saturating_add(origin)
+}
+
 /// Physical input seen on this device, in Overdesk terms.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Captured {
@@ -149,5 +184,17 @@ mod tests {
         c.key(L_GUI, false);
         c.key(ESC, false);
         assert!(!c.key(ESC, true), "Command was released");
+    }
+
+    #[test]
+    fn bounding_box_spans_monitors_with_negative_origins() {
+        assert_eq!(bounding_box([]), None);
+        assert_eq!(bounding_box([(0, 0, 1920, 1080)]), Some((0, 0, 1920, 1080)));
+        // A second monitor to the left and above the main one.
+        let two = [(0, 0, 1920, 1080), (-1280, -200, 1280, 1024)];
+        assert_eq!(bounding_box(two), Some((-1280, -200, 3200, 1280)));
+        assert_eq!(to_local(-1280, -1280), 0);
+        assert_eq!(to_global(0, -1280), -1280);
+        assert_eq!(to_global(to_local(1919, -1280), -1280), 1919);
     }
 }

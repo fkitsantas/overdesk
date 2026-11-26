@@ -10,7 +10,7 @@ use overdesk_proto::{Button, Phase, ScrollUnit};
 
 use super::events::Notches;
 use super::keymap::keycode_to_code;
-use crate::input::{Captured, EscapeChord};
+use crate::input::{Captured, EscapeChord, bounding_box};
 use crate::mac::events::Subpixel;
 
 /// How long an activation may stay unclaimed. The engine answers an edge crossing with
@@ -102,13 +102,13 @@ impl Zone {
     }
 }
 
-/// The zone that holds the engine's screen: the one containing the origin, else the first.
-pub fn primary_zone(zones: &[Zone]) -> Option<Zone> {
-    zones
-        .iter()
-        .find(|z| z.contains((0.0, 0.0)))
-        .or_else(|| zones.first())
-        .copied()
+/// The engine's screen: the bounding box of every zone, as a [`Zone`]. `None` without zones.
+///
+/// shortcut: parts of the box covered by no zone are unreachable, so crossings only happen
+/// where a zone touches the box edge; see [`crate::input::bounding_box`].
+pub fn desk_bounds(zones: &[Zone]) -> Option<Zone> {
+    let (x, y, w, h) = bounding_box(zones.iter().map(|z| (z.x, z.y, z.w, z.h)))?;
+    Some(Zone { x, y, w, h })
 }
 
 /// Nearest point of any zone to `p`: `p` itself when inside one.
@@ -138,14 +138,15 @@ pub enum Edge {
 }
 
 impl Edge {
-    /// The barrier id of this edge (1..=4, never zero as the portal requires).
+    /// The base barrier id of this edge (1..=4, never zero as the portal requires). An edge
+    /// split over several zone runs adds multiples of 4 for the extra barriers.
     pub fn barrier_id(self) -> u32 {
         EDGES.iter().position(|e| *e == self).map_or(1, |i| i as u32 + 1)
     }
 
-    /// The edge a barrier id belongs to.
+    /// The edge a barrier id belongs to, whichever run of that edge it guards.
     pub fn from_barrier_id(id: u32) -> Option<Self> {
-        EDGES.get(usize::try_from(id).ok()?.checked_sub(1)?).copied()
+        EDGES.get((usize::try_from(id).ok()?.checked_sub(1)?) % 4).copied()
     }
 
     /// Outward unit motion across this edge.
@@ -162,8 +163,10 @@ impl Edge {
 /// One pointer barrier request: a line on a zone edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Barrier {
-    /// Edge it guards; its id is [`Edge::barrier_id`].
+    /// Edge it guards.
     pub edge: Edge,
+    /// Portal barrier id: [`Edge::barrier_id`] plus 4 per extra run on the same edge.
+    pub id: u32,
     /// Start x, inclusive.
     pub x1: i32,
     /// Start y, inclusive.
@@ -174,39 +177,55 @@ pub struct Barrier {
     pub y2: i32,
 }
 
-/// Barriers on the outer edges of `primary`. An edge another zone touches is internal (the
-/// portal denies those), so it is skipped. Only the primary zone matters: it is the engine's
-/// screen, and neighbours in the desk layout are peers beside it.
-pub fn plan_barriers(primary: Zone, zones: &[Zone]) -> Vec<Barrier> {
-    let (x, y) = (i64::from(primary.x), i64::from(primary.y));
-    let (r, b) = (primary.right(), primary.bottom());
-    let overlap = |a0: i64, a1: i64, b0: i64, b1: i64| a0 < b1 && b0 < a1;
-    let touched = |edge: Edge| {
-        zones.iter().filter(|z| **z != primary).any(|z| match edge {
-            Edge::Left => z.right() == x && overlap(y, b, i64::from(z.y), z.bottom()),
-            Edge::Right => i64::from(z.x) == r && overlap(y, b, i64::from(z.y), z.bottom()),
-            Edge::Top => z.bottom() == y && overlap(x, r, i64::from(z.x), z.right()),
-            Edge::Bottom => i64::from(z.y) == b && overlap(x, r, i64::from(z.x), z.right()),
-        })
-    };
-    let (last_x, last_y) = ((r - 1) as i32, (b - 1) as i32);
-    EDGES
-        .iter()
-        .filter(|e| !touched(**e))
-        .map(|&edge| {
-            // Right and bottom barriers sit on the line just past the zone, as the portal docs show.
+/// Barriers on the outer edges of the bounding box `desk`, only where a zone's own edge lies
+/// on it (the portal denies barriers elsewhere). Zones touching the same box edge are merged
+/// into runs, one barrier per run. Edges between neighbouring zones are never on the box edge.
+pub fn plan_barriers(desk: Zone, zones: &[Zone]) -> Vec<Barrier> {
+    let (x, y) = (i64::from(desk.x), i64::from(desk.y));
+    let (r, b) = (desk.right(), desk.bottom());
+    let mut out = Vec::new();
+    for edge in EDGES {
+        // (start, end) of each zone's span along this edge, for zones lying on it.
+        let mut runs: Vec<(i64, i64)> = zones
+            .iter()
+            .filter_map(|z| match edge {
+                Edge::Left => (i64::from(z.x) == x).then_some((i64::from(z.y), z.bottom())),
+                Edge::Right => (z.right() == r).then_some((i64::from(z.y), z.bottom())),
+                Edge::Top => (i64::from(z.y) == y).then_some((i64::from(z.x), z.right())),
+                Edge::Bottom => (z.bottom() == b).then_some((i64::from(z.x), z.right())),
+            })
+            .collect();
+        runs.sort_unstable();
+        let mut merged: Vec<(i64, i64)> = Vec::new();
+        for (s0, s1) in runs {
+            match merged.last_mut() {
+                Some(last) if s0 <= last.1 => last.1 = last.1.max(s1),
+                _ => merged.push((s0, s1)),
+            }
+        }
+        for (i, (s0, s1)) in merged.into_iter().enumerate() {
+            let (s0, s1) = (s0 as i32, (s1 - 1) as i32);
+            // Right and bottom barriers sit on the line just past the box, as the portal docs show.
             let (x1, y1, x2, y2) = match edge {
-                Edge::Left => (primary.x, primary.y, primary.x, last_y),
-                Edge::Right => (last_x + 1, primary.y, last_x + 1, last_y),
-                Edge::Top => (primary.x, primary.y, last_x, primary.y),
-                Edge::Bottom => (primary.x, last_y + 1, last_x, last_y + 1),
+                Edge::Left => (desk.x, s0, desk.x, s1),
+                Edge::Right => (r as i32, s0, r as i32, s1),
+                Edge::Top => (s0, desk.y, s1, desk.y),
+                Edge::Bottom => (s0, b as i32, s1, b as i32),
             };
-            Barrier { edge, x1, y1, x2, y2 }
-        })
-        .collect()
+            out.push(Barrier {
+                edge,
+                id: edge.barrier_id() + 4 * i as u32,
+                x1,
+                y1,
+                x2,
+                y2,
+            });
+        }
+    }
+    out
 }
 
-/// The primary zone's edge nearest `p`; the fallback when the compositor cannot say which
+/// The desk box's edge nearest `p`; the fallback when the compositor cannot say which
 /// barrier fired.
 fn nearest_edge(z: Zone, p: (f64, f64)) -> Edge {
     let d = [
@@ -286,13 +305,13 @@ pub enum Out {
     /// Send this to the engine.
     Emit(Captured),
     /// Release the activation with a cursor hint (compositor coordinates); `local` is the
-    /// same point relative to the primary zone, for the injector.
+    /// same point relative to the desk box, for the injector.
     Release {
         /// Activation to end.
         id: u32,
         /// Hint in compositor coordinates.
         at: (f64, f64),
-        /// Hint relative to the primary zone.
+        /// Hint relative to the desk box.
         local: (f64, f64),
     },
     /// Set barriers and enable capture again, then report [`Input::Armed`].
@@ -332,7 +351,7 @@ pub struct Machine {
     state: State,
     /// Zones from the last arming.
     zones: Vec<Zone>,
-    /// Zone holding the engine's screen.
+    /// Bounding box of all zones: the engine's screen.
     primary: Option<Zone>,
     /// Escape chord detector, reset per activation.
     chord: EscapeChord,
@@ -356,7 +375,7 @@ impl Default for Machine {
 }
 
 impl Machine {
-    /// Size of the engine's screen, once armed.
+    /// Size of the engine's screen (the zones' bounding box), once armed.
     pub fn primary_size(&self) -> Option<(u32, u32)> {
         self.primary.map(|z| (z.w, z.h))
     }
@@ -379,7 +398,7 @@ impl Machine {
         })
     }
 
-    /// Position relative to the primary zone, as the engine wants it.
+    /// Position relative to the desk box, as the engine wants it.
     fn local(&self, p: (f64, f64)) -> (i32, i32) {
         let z = self.primary.unwrap_or(Zone { x: 0, y: 0, w: 0, h: 0 });
         (
@@ -393,7 +412,7 @@ impl Machine {
         let mut out = Vec::new();
         match input {
             Input::Armed(zones) => {
-                self.primary = primary_zone(&zones);
+                self.primary = desk_bounds(&zones);
                 self.zones = zones;
                 if !self.is_active() {
                     self.state = State::Idle;
@@ -452,14 +471,16 @@ impl Machine {
         let edge = barrier
             .and_then(Edge::from_barrier_id)
             .unwrap_or_else(|| nearest_edge(z, p));
-        let (cx, cy) = z.clamp(p);
         let (ox, oy) = edge.outward();
-        let entry = match edge {
-            Edge::Left => (f64::from(z.x), cy),
-            Edge::Right => ((z.right() - 1) as f64, cy),
-            Edge::Top => (cx, f64::from(z.y)),
-            Edge::Bottom => (cx, (z.bottom() - 1) as f64),
+        // Pin to the box edge, then to the nearest zone point: on a non-rectangular layout the
+        // crossing row may fall outside every zone.
+        let pinned = match edge {
+            Edge::Left => (f64::from(z.x), p.1),
+            Edge::Right => ((z.right() - 1) as f64, p.1),
+            Edge::Top => (p.0, f64::from(z.y)),
+            Edge::Bottom => (p.0, (z.bottom() - 1) as f64),
         };
+        let entry = clamp_to_zones(&self.zones, pinned);
         // Release one pixel inside the edge so the cursor does not re-trigger the barrier.
         let release_at = (entry.0 - f64::from(ox), entry.1 - f64::from(oy));
         self.chord = EscapeChord::default();
@@ -537,7 +558,7 @@ impl Machine {
 /// absolute targets from the engine become deltas from the last known position.
 #[derive(Debug, Default)]
 pub struct Pointer {
-    /// Last known position relative to the primary zone, `None` until learned.
+    /// Last known position relative to the desk box, `None` until learned.
     pos: Option<(f64, f64)>,
 }
 
@@ -554,8 +575,8 @@ impl Pointer {
 
     /// Relative moves that bring the pointer to `(x, y)`. With no known position it first
     /// homes to the top-left corner (the compositor clamps), then moves from there.
-    /// shortcut: assumes the primary zone starts at the compositor origin; a hand test on
-    /// multi-monitor layouts decides whether it needs the zone offset.
+    /// shortcut: homing assumes the desk box's top-left corner lies on a zone; on a layout
+    /// where it does not, the compositor clamps elsewhere and the first move is off by that gap.
     pub fn move_to(&mut self, x: f64, y: f64) -> Vec<(f64, f64)> {
         let (x, y) = (x.max(0.0), y.max(0.0));
         let mut moves = Vec::new();
@@ -653,39 +674,122 @@ mod tests {
             assert_eq!(Edge::from_barrier_id(e.barrier_id()), Some(e));
         }
         assert_eq!(Edge::from_barrier_id(0), None);
-        assert_eq!(Edge::from_barrier_id(5), None);
+        assert_eq!(
+            Edge::from_barrier_id(5),
+            Some(Edge::Left),
+            "extra runs of an edge map back to it"
+        );
     }
 
     #[test]
-    fn barriers_skip_edges_shared_with_another_monitor() {
+    fn barriers_sit_on_the_outer_edges_of_the_union() {
         let right = Zone {
             x: 1920,
             y: 0,
             w: 1280,
             h: 1024,
         };
-        let b = plan_barriers(Z, &[Z, right]);
-        assert_eq!(b.len(), 3);
-        assert!(b.iter().all(|b| b.edge != Edge::Right));
-        let all = plan_barriers(Z, &[Z]);
-        assert_eq!(all.len(), 4);
-        let r = all.iter().find(|b| b.edge == Edge::Right).unwrap();
-        assert_eq!((r.x1, r.y1, r.x2, r.y2), (1920, 0, 1920, 1079));
-        let bt = all.iter().find(|b| b.edge == Edge::Bottom).unwrap();
+        let b = plan_barriers(desk_bounds(&[Z, right]).unwrap(), &[Z, right]);
+        let find = |e: Edge| b.iter().filter(|b| b.edge == e).collect::<Vec<_>>();
+        // The shared edge is interior; the top runs of both zones merge into one barrier.
+        assert_eq!(find(Edge::Top).len(), 1);
+        let t = find(Edge::Top)[0];
+        assert_eq!((t.x1, t.y1, t.x2, t.y2), (0, 0, 3199, 0));
+        let r = find(Edge::Right)[0];
+        assert_eq!((r.x1, r.y1, r.x2, r.y2), (3200, 0, 3200, 1023));
+        // The bottom box edge (1080) lies only on the left zone.
+        let bt = find(Edge::Bottom)[0];
         assert_eq!((bt.x1, bt.y1, bt.x2, bt.y2), (0, 1080, 1919, 1080));
+        assert_eq!(plan_barriers(Z, &[Z]).len(), 4);
     }
 
     #[test]
-    fn primary_is_the_zone_at_the_origin() {
+    fn barriers_skip_box_edges_no_zone_touches_and_split_runs() {
+        // Stacked right column of two zones with a gap, left zone shorter than the box.
+        let left = Zone {
+            x: 0,
+            y: 0,
+            w: 1000,
+            h: 500,
+        };
+        let top_r = Zone {
+            x: 1000,
+            y: 0,
+            w: 1000,
+            h: 400,
+        };
+        let low_r = Zone {
+            x: 1000,
+            y: 600,
+            w: 1000,
+            h: 400,
+        };
+        let zones = [left, top_r, low_r];
+        let b = plan_barriers(desk_bounds(&zones).unwrap(), &zones);
+        let right: Vec<_> = b.iter().filter(|b| b.edge == Edge::Right).collect();
+        assert_eq!(right.len(), 2, "two runs on the right edge");
+        assert_eq!((right[0].y1, right[0].y2, right[0].id), (0, 399, 2));
+        assert_eq!((right[1].y1, right[1].y2, right[1].id), (600, 999, 6));
+        assert_eq!(Edge::from_barrier_id(6), Some(Edge::Right));
+        // Only `left` reaches the box's left edge, and only its own rows are guarded.
+        let l = b.iter().find(|b| b.edge == Edge::Left).unwrap();
+        assert_eq!((l.y1, l.y2), (0, 499));
+    }
+
+    #[test]
+    fn desk_is_the_bounding_box_with_negative_origin() {
         let other = Zone {
             x: -1000,
             y: 0,
             w: 1000,
             h: 800,
         };
-        assert_eq!(primary_zone(&[other, Z]), Some(Z));
-        assert_eq!(primary_zone(&[other]), Some(other));
-        assert_eq!(primary_zone(&[]), None);
+        assert_eq!(
+            desk_bounds(&[other, Z]),
+            Some(Zone {
+                x: -1000,
+                y: 0,
+                w: 2920,
+                h: 1080
+            })
+        );
+        assert_eq!(desk_bounds(&[other]), Some(other));
+        assert_eq!(desk_bounds(&[]), None);
+    }
+
+    #[test]
+    fn crossing_and_motion_stay_on_real_zones_and_report_box_relative_positions() {
+        let left = Zone {
+            x: -1000,
+            y: 0,
+            w: 1000,
+            h: 800,
+        };
+        let mut m = armed(&[left, Z]);
+        // Cross the left edge of the union at a row below the left zone: pinned into a zone.
+        let out = cross(&mut m, 0, Edge::Left, (-1000.0, 900.0));
+        // Box origin is -1000, so the entry (-1000, 799) is local (0, 799).
+        assert_eq!(
+            out,
+            vec![Out::Emit(Captured::Moved {
+                dx: -1,
+                dy: 0,
+                x: 0,
+                y: 799
+            })]
+        );
+        m.step(1, Input::Swallow(true));
+        // Pushing down inside the left zone clamps at its bottom row, not the box's.
+        let out = m.step(2, Input::Motion(0.0, 500.0));
+        assert_eq!(
+            out,
+            vec![Out::Emit(Captured::Moved {
+                dx: 0,
+                dy: 500,
+                x: 0,
+                y: 799
+            })]
+        );
     }
 
     #[test]

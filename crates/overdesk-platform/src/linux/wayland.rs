@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Wayland capture and injection through the desktop portals (design: `docs/WAYLAND.md`).
 //!
-//! Capture uses `InputCapture`: barriers on the primary screen's outer edges, and while the
+//! Capture uses `InputCapture`: barriers on the outer edges of the union of all screens, and while the
 //! compositor has capture active, input arrives over EIS (`reis`, receiver side). Injection
 //! uses `RemoteDesktop` with the `Notify*` calls. One tokio thread owns every portal session;
 //! the adapters talk to it over channels. All decisions live in `wayland_core`.
@@ -37,7 +37,7 @@ use super::events::Notches;
 use super::ffi::LinuxError;
 use super::keymap::code_to_keycode;
 use super::wayland_core::{
-    Input, Machine, Out, Pointer, ScrollOut, Zone, evdev_from_button, plan_barriers, portal_unavailable, primary_zone,
+    Input, Machine, Out, Pointer, ScrollOut, Zone, desk_bounds, evdev_from_button, plan_barriers, portal_unavailable,
     scroll_out, store_dir,
 };
 use crate::input::Captured;
@@ -52,7 +52,7 @@ const TICK: Duration = Duration::from_millis(50);
 /// How long dropping an adapter waits for its portal task to finish releasing.
 const DROP_WAIT: Duration = Duration::from_secs(1);
 
-/// Primary screen size as read from the portal zones; `None` before capture armed.
+/// Desk box (all zones) size as read from the portal zones; `None` before capture armed.
 static PRIMARY: Mutex<Option<(u32, u32)>> = Mutex::new(None);
 /// Where the pointer is, shared so a capture release tells the injector where it landed.
 static POINTER: Mutex<Option<Pointer>> = Mutex::new(None);
@@ -119,7 +119,7 @@ where
         .map_err(|_| unavailable("portal thread stopped"))
 }
 
-/// Primary display size in pixels; `(0, 0)` until capture has read the zones.
+/// Desktop size in pixels (bounding box of all monitors); `(0, 0)` until capture has read the zones.
 pub fn main_display_size() -> (u32, u32) {
     PRIMARY.lock().unwrap_or_else(PoisonError::into_inner).unwrap_or((0, 0))
 }
@@ -244,7 +244,7 @@ impl Drop for Capture {
     }
 }
 
-/// Reads the portal zones, sets barriers on the primary screen and enables capture.
+/// Reads the portal zones, sets barriers on the union's outer edges and enables capture.
 async fn arm(ic: &InputCapture, session: &ashpd::desktop::Session<InputCapture>) -> Result<Vec<Zone>, String> {
     let zones = ic
         .zones(session, Default::default())
@@ -262,11 +262,11 @@ async fn arm(ic: &InputCapture, session: &ashpd::desktop::Session<InputCapture>)
             h: r.height(),
         })
         .collect();
-    let primary = primary_zone(&list).ok_or("the compositor reported no screens")?;
+    let primary = desk_bounds(&list).ok_or("the compositor reported no screens")?;
     let barriers: Vec<Barrier> = plan_barriers(primary, &list)
         .into_iter()
         .filter_map(|b| {
-            let id = std::num::NonZeroU32::new(b.edge.barrier_id())?;
+            let id = std::num::NonZeroU32::new(b.id)?;
             Some(Barrier::new(id, (b.x1, b.y1, b.x2, b.y2)))
         })
         .collect();
@@ -486,7 +486,7 @@ impl Injector {
         with_pointer(|p| p.get()).unwrap_or((0.0, 0.0))
     }
 
-    /// Moves the pointer to primary-screen pixel coordinates, as relative motion from where
+    /// Moves the pointer to desk-box pixel coordinates, as relative motion from where
     /// it was last known to be.
     pub fn pointer(&mut self, x: f64, y: f64) {
         for (dx, dy) in with_pointer(|p| p.move_to(x, y)) {

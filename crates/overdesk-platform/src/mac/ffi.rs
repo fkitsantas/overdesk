@@ -28,7 +28,7 @@ use super::events::{
     phase_from_cg, phase_to_cg,
 };
 use super::keymap::{code_to_vk, vk_to_code};
-use crate::input::EscapeChord;
+use crate::input::{EscapeChord, Rect, bounding_box, to_local};
 
 /// Stamped into `kCGEventSourceUserData` of every event we post, so our own tap ignores
 /// it. Every peer both captures and injects; without this, input would loop forever.
@@ -51,11 +51,36 @@ pub enum MacError {
     SourceCreateFailed,
 }
 
-/// Main display size in points.
-/// shortcut: main display only; multi-display Macs need per-display screens on the Desk.
+/// Bounding box of every active display in global points (main display at 0,0, y down;
+/// origins may be negative). Falls back to the main display if the list is unavailable.
+///
+/// shortcut: read at each session start (capture and injector creation), not on
+/// display reconfiguration; a display plugged in mid-session is picked up at the next
+/// session. A `CGDisplayRegisterReconfigurationCallback` would make it live.
+fn desktop_bounds() -> Rect {
+    use objc2_core_graphics::{CGDirectDisplayID, CGDisplayBounds, CGGetActiveDisplayList, CGMainDisplayID};
+    const MAX: usize = 32;
+    let mut ids: [CGDirectDisplayID; MAX] = [0; MAX];
+    let mut n = 0u32;
+    // SAFETY: `ids` has room for `MAX` entries and `n` is a valid out-pointer.
+    let ok = unsafe { CGGetActiveDisplayList(MAX as u32, ids.as_mut_ptr(), &mut n) }.0 == 0;
+    let ids = if ok { &ids[..(n as usize).min(MAX)] } else { &[] };
+    let rect = |id| {
+        let r = CGDisplayBounds(id);
+        (
+            r.origin.x as i32,
+            r.origin.y as i32,
+            r.size.width as u32,
+            r.size.height as u32,
+        )
+    };
+    bounding_box(ids.iter().map(|&id| rect(id))).unwrap_or_else(|| rect(CGMainDisplayID()))
+}
+
+/// Desktop size in points: the bounding box of all displays, this Mac's screen on the Desk.
 pub fn main_display_size() -> (u32, u32) {
-    let r = objc2_core_graphics::CGDisplayBounds(objc2_core_graphics::CGMainDisplayID());
-    (r.size.width as u32, r.size.height as u32)
+    let (_, _, w, h) = desktop_bounds();
+    (w, h)
 }
 
 /// `(may capture, may inject)` without prompting.
@@ -96,6 +121,8 @@ struct TapCtx {
     chord: RefCell<EscapeChord>,
     /// Whether this tap last hid the cursor.
     detached: Cell<bool>,
+    /// Top-left of the desktop box when the tap started; captured positions are relative to it.
+    origin: (i32, i32),
 }
 
 unsafe extern "C" {
@@ -228,6 +255,10 @@ fn run_tap(tx: Sender<Captured>, swallow: Arc<AtomicBool>, stop: Arc<AtomicBool>
         sub: RefCell::new(Subpixel::default()),
         chord: RefCell::new(EscapeChord::default()),
         detached: Cell::new(false),
+        origin: {
+            let (x, y, _, _) = desktop_bounds();
+            (x, y)
+        },
     });
     let ctx_ptr = &*ctx as *const TapCtx as *mut c_void;
     let callback: CGEventTapCallBack = Some(tap_callback);
@@ -400,8 +431,8 @@ fn translate(ty: CGEventType, ev: &CGEvent, ctx: &TapCtx) -> Option<(Held, bool)
                 send(Captured::Moved {
                     dx,
                     dy,
-                    x: at.x as i32,
-                    y: at.y as i32,
+                    x: to_local(at.x as i32, ctx.origin.0),
+                    y: to_local(at.y as i32, ctx.origin.1),
                 });
             }
             None
@@ -481,6 +512,8 @@ pub struct Injector {
     pos: CGPoint,
     /// Time origin for the click counter's millisecond timestamps.
     epoch: Instant,
+    /// Top-left of the desktop box when the injector was created, added to box-relative targets.
+    origin: (i32, i32),
 }
 
 impl Injector {
@@ -503,6 +536,10 @@ impl Injector {
             last_click_count: 1,
             pos,
             epoch: Instant::now(),
+            origin: {
+                let (x, y, _, _) = desktop_bounds();
+                (x, y)
+            },
         })
     }
 
@@ -515,8 +552,9 @@ impl Injector {
         CGEvent::post(CGEventTapLocation::HIDEventTap, Some(ev));
     }
 
-    /// Moves the pointer to global display coordinates (points, top-left origin).
+    /// Moves the pointer to desktop-box coordinates (points, top-left origin).
     pub fn pointer(&mut self, x: f64, y: f64) {
+        let (x, y) = (x + f64::from(self.origin.0), y + f64::from(self.origin.1));
         let (dx, dy) = (x - self.pos.x, y - self.pos.y);
         self.pos = CGPoint { x, y };
         let (ty, button) = match move_kind(&self.buttons) {
@@ -540,12 +578,13 @@ impl Injector {
         }
     }
 
-    /// Where the system cursor actually is now (global points).
+    /// Where the system cursor actually is now (desktop-box points).
     pub fn cursor() -> (f64, f64) {
         let p = CGEvent::new(None)
             .map(|e| CGEvent::location(Some(&e)))
             .unwrap_or(CGPoint { x: 0.0, y: 0.0 });
-        (p.x, p.y)
+        let (ox, oy, _, _) = desktop_bounds();
+        (p.x - f64::from(ox), p.y - f64::from(oy))
     }
 
     /// Releases every key and button this injector holds down. Call when focus leaves

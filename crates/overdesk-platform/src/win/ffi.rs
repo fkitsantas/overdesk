@@ -20,7 +20,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
     KEYEVENTF_SCANCODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
     MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-    MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
+    MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
 };
 use windows_sys::Win32::UI::Input::{
     GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK, RIM_TYPEMOUSE,
@@ -29,15 +29,16 @@ use windows_sys::Win32::UI::Input::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics,
     HC_ACTION, HWND_MESSAGE, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_UP, MSG, MSLLHOOKSTRUCT, PostThreadMessageW,
-    RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-    WH_MOUSE_LL, WM_INPUT, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW,
+    RegisterClassW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SetWindowsHookExW,
+    TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_INPUT, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW,
 };
 
 use super::events::{absolute, wheel_units};
 use super::keymap::{code_to_scan, scan_to_code};
 pub use crate::input::Captured;
-use crate::input::EscapeChord;
+use crate::input::{EscapeChord, Rect, to_local};
 use crate::mac::events::{Held, LocalDowns};
 
 /// Put in `dwExtraInfo` of everything we inject, so our own hooks skip it. Every peer
@@ -71,17 +72,36 @@ fn ensure_dpi_aware() {
     });
 }
 
-/// Primary display size in pixels.
-/// shortcut: primary monitor only; multi-monitor PCs need per-monitor screens on the Desk.
-pub fn main_display_size() -> (u32, u32) {
+/// The virtual screen (bounding box of all monitors) in global pixels; its origin is
+/// negative when a monitor sits left of or above the primary one. Read live, so monitor
+/// monitor hot-plug needs no handling.
+fn virtual_screen() -> Rect {
     ensure_dpi_aware();
     // SAFETY: plain Win32 calls.
     unsafe {
         (
-            GetSystemMetrics(SM_CXSCREEN) as u32,
-            GetSystemMetrics(SM_CYSCREEN) as u32,
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN) as u32,
+            GetSystemMetrics(SM_CYVIRTUALSCREEN) as u32,
         )
     }
+}
+
+/// Desktop size in pixels: the virtual screen spanning all monitors, this PC's screen on
+/// the Desk.
+pub fn main_display_size() -> (u32, u32) {
+    let (_, _, w, h) = virtual_screen();
+    (w, h)
+}
+
+/// The system cursor in virtual-screen-relative pixels.
+fn cursor_local() -> (i32, i32) {
+    let mut at = POINT { x: 0, y: 0 };
+    // SAFETY: writes one POINT.
+    unsafe { GetCursorPos(&mut at) };
+    let (ox, oy, _, _) = virtual_screen();
+    (to_local(at.x, ox), to_local(at.y, oy))
 }
 
 /// Windows needs no permission prompt for hooks or `SendInput` as a standard user.
@@ -297,22 +317,12 @@ unsafe extern "system" fn raw_input_window(hwnd: HWND, msg: u32, wparam: WPARAM,
             let mouse = unsafe { raw.data.mouse };
             let (dx, dy) = (mouse.lLastX, mouse.lLastY);
             if mouse.usFlags & MOUSE_MOVE_ABSOLUTE == 0 && (dx, dy) != (0, 0) {
-                let mut at = POINT { x: 0, y: 0 };
-                // SAFETY: writes one POINT.
-                unsafe { GetCursorPos(&mut at) };
+                let (x, y) = cursor_local();
                 CTX.with_borrow(|c| {
                     if let Some(ctx) = c {
                         // shortcut: raw deltas skip Windows pointer acceleration; apply the
                         // user's pointer-speed curve if driving a peer feels slow.
-                        send(
-                            ctx,
-                            Captured::Moved {
-                                dx,
-                                dy,
-                                x: at.x,
-                                y: at.y,
-                            },
-                        );
+                        send(ctx, Captured::Moved { dx, dy, x, y });
                     }
                 });
             }
@@ -463,8 +473,6 @@ pub struct Injector {
     keys: Vec<u32>,
     /// Buttons this injector has pressed and not yet released.
     buttons: Vec<Button>,
-    /// Primary display size in pixels, captured at creation, for absolute coordinates.
-    size: (u32, u32),
 }
 
 /// Builds one `SendInput` mouse record tagged with [`INJECTED_TAG`]. `dx`/`dy` are
@@ -501,28 +509,32 @@ fn send_inputs(inputs: &[INPUT]) {
 }
 
 impl Injector {
-    /// Creates an injector for the primary display. Never fails on Windows; the
+    /// Creates an injector for the virtual screen. Never fails on Windows; the
     /// `Result` matches the macOS adapter.
     pub fn new() -> Result<Self, WinError> {
         Ok(Self {
             keys: Vec::new(),
             buttons: Vec::new(),
-            size: main_display_size(),
         })
     }
 
-    /// Where the system cursor is now (pixels).
+    /// Where the system cursor is now (virtual-screen pixels).
     pub fn cursor() -> (f64, f64) {
-        let mut at = POINT { x: 0, y: 0 };
-        // SAFETY: writes one POINT.
-        unsafe { GetCursorPos(&mut at) };
-        (at.x as f64, at.y as f64)
+        let (x, y) = cursor_local();
+        (f64::from(x), f64::from(y))
     }
 
-    /// Moves the pointer to primary-screen pixel coordinates.
+    /// Moves the pointer to virtual-screen pixel coordinates. `MOUSEEVENTF_VIRTUALDESK`
+    /// maps 0..=65535 across the whole virtual screen, so box-relative input needs no origin.
     pub fn pointer(&mut self, x: f64, y: f64) {
-        let (ax, ay) = absolute(x as i32, y as i32, self.size.0, self.size.1);
-        send_inputs(&[mouse_input(ax, ay, 0, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE)]);
+        let (_, _, w, h) = virtual_screen(); // live: survives monitor hot-plug
+        let (ax, ay) = absolute(x as i32, y as i32, w, h);
+        send_inputs(&[mouse_input(
+            ax,
+            ay,
+            0,
+            MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+        )]);
     }
 
     /// Presses or releases `button` at the current cursor position, tracking it so

@@ -16,7 +16,8 @@ pub fn wheel_units(delta: i32, unit: ScrollUnit) -> i32 {
     }
 }
 
-/// `MOUSEEVENTF_ABSOLUTE` coordinates: 0..=65535 across the primary screen.
+/// `MOUSEEVENTF_ABSOLUTE` coordinates: 0..=65535 across the virtual screen
+/// (pair with `MOUSEEVENTF_VIRTUALDESK`); `x`/`y` are relative to its origin.
 pub fn absolute(x: i32, y: i32, width: u32, height: u32) -> (i32, i32) {
     let scale = |v: i32, size: u32| {
         let max = (size.max(2) - 1) as i64;

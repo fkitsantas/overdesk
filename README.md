@@ -136,7 +136,8 @@ cargo run --release -p overdesk-app
 
 Pair once. After that, the two computers find each other and reconnect on their own: after
 a restart, sleep, or a dropped Wi-Fi. Repeated wrong pairing attempts from other computers
-are slowed down (10 s, then 30 s, then 60 s). Press **Disconnect** and they stay apart until you
+are slowed down (10 s, then 30 s, then 60 s). Every monitor counts: the cursor crosses from whichever
+display touches the edge, and the other computer's mouse reaches all of yours. Press **Disconnect** and they stay apart until you
 connect again. Installed copies open at login (per user, no admin rights); switch it off on
 the pairing screen or in the tray menu.
 

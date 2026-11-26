@@ -13,7 +13,6 @@ use std::thread::JoinHandle;
 use overdesk_proto::{Button, Phase, ScrollUnit};
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
-use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::xfixes::ConnectionExt as _;
 use x11rb::protocol::xinput::{self, ConnectionExt as _, Fp3232, XIEventMask};
 use x11rb::protocol::xproto::{
@@ -58,23 +57,18 @@ fn connect() -> Result<(RustConnection, xproto::Window), LinuxError> {
     Ok((conn, root))
 }
 
-/// Primary display size in pixels: the RandR primary output's mode, else the root window.
-/// `(0, 0)` when no X server is reachable.
-/// shortcut: primary output only; multi-monitor setups need per-monitor screens on the Desk.
+/// Desktop size in pixels: the root window, which spans every monitor (RandR places them
+/// inside it), so this is the bounding box and root coordinates are already box-relative
+/// with the origin at 0,0. `(0, 0)` when no X server is reachable.
+///
+/// shortcut: monitors that leave holes in the root (an L-shaped layout) are unreachable
+/// there; see [`crate::input::bounding_box`].
 pub fn main_display_size() -> (u32, u32) {
     let Ok((conn, root)) = connect() else { return (0, 0) };
-    let randr = || -> Option<(u32, u32)> {
-        let primary = conn.randr_get_output_primary(root).ok()?.reply().ok()?.output;
-        let crtc = conn.randr_get_output_info(primary, 0).ok()?.reply().ok()?.crtc;
-        let info = conn.randr_get_crtc_info(crtc, 0).ok()?.reply().ok()?;
-        (info.width > 0).then_some((info.width.into(), info.height.into()))
-    };
-    randr().unwrap_or_else(|| {
-        conn.get_geometry(root)
-            .ok()
-            .and_then(|c| c.reply().ok())
-            .map_or((0, 0), |g| (g.width.into(), g.height.into()))
-    })
+    conn.get_geometry(root)
+        .ok()
+        .and_then(|c| c.reply().ok())
+        .map_or((0, 0), |g| (g.width.into(), g.height.into()))
 }
 
 /// A running capture. Dropping it stops the capture thread and releases any grab.
@@ -459,7 +453,7 @@ impl Drop for Injector {
 }
 
 impl Injector {
-    /// Creates an injector for the primary display; fails if the XTest extension is missing.
+    /// Creates an injector for the whole root window (all monitors); fails if the XTest extension is missing.
     pub fn new() -> Result<Self, LinuxError> {
         let (conn, root) = connect()?;
         conn.xtest_get_version(2, 2).map_err(x11)?.reply().map_err(x11)?;
@@ -493,7 +487,7 @@ impl Injector {
         let _ = self.conn.flush();
     }
 
-    /// Moves the pointer to primary-screen pixel coordinates.
+    /// Moves the pointer to root-window pixel coordinates.
     pub fn pointer(&mut self, x: f64, y: f64) {
         let clamp = |v: f64| v.round().clamp(0.0, f64::from(i16::MAX)) as i16;
         self.fake(xproto::MOTION_NOTIFY_EVENT, 0, clamp(x), clamp(y));
