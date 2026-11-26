@@ -3,7 +3,7 @@
 //! lives in the pure `events` / `keymap` modules.
 #![allow(unsafe_code)] // FFI boundary; each unsafe block states its invariant.
 
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::{NonNull, null_mut};
@@ -77,6 +77,15 @@ struct TapCtx {
     local: RefCell<LocalDowns>,
     sub: RefCell<Subpixel>,
     chord: RefCell<EscapeChord>,
+    /// Whether this tap last detached the cursor from the mouse.
+    detached: Cell<bool>,
+}
+
+/// While swallowing, the cursor must stay put: swallowed events never reach apps, but
+/// macOS still moves the cursor itself unless it is detached from the mouse. Deltas
+/// keep arriving at the tap either way.
+fn detach_cursor(on: bool) {
+    let _ = objc2_core_graphics::CGAssociateMouseAndMouseCursorPosition(!on);
 }
 
 /// `kCGEventFlagMaskAlphaShift`: Caps Lock state, owned by the system, never by us.
@@ -123,6 +132,9 @@ impl Capture {
     /// (focus is on another peer).
     pub fn set_swallow(&self, on: bool) {
         self.swallow.store(on, Ordering::Relaxed);
+        // Immediate, so the cursor stops at the edge as focus leaves; the tap
+        // reconciles again on its next event.
+        detach_cursor(on);
     }
 }
 
@@ -163,6 +175,7 @@ fn run_tap(tx: Sender<Captured>, swallow: Arc<AtomicBool>, stop: Arc<AtomicBool>
         local: RefCell::new(LocalDowns::default()),
         sub: RefCell::new(Subpixel::default()),
         chord: RefCell::new(EscapeChord::default()),
+        detached: Cell::new(false),
     });
     let ctx_ptr = &*ctx as *const TapCtx as *mut c_void;
     let callback: CGEventTapCallBack = Some(tap_callback);
@@ -203,6 +216,9 @@ fn run_tap(tx: Sender<Captured>, swallow: Arc<AtomicBool>, stop: Arc<AtomicBool>
         CFRunLoop::run_in_mode(mode, 0.1, false);
     }
     CGEvent::tap_enable(&port, false);
+    if ctx.detached.get() {
+        detach_cursor(false);
+    }
     run_loop.remove_source(Some(&source), mode);
     port.invalidate();
     drop(source);
@@ -248,6 +264,12 @@ fn handle(ctx: &TapCtx, ty: CGEventType, ev: &CGEvent, raw: *mut CGEvent) -> *mu
         let _ = ctx.tx.send(Captured::Escape);
     }
     let swallowing = ctx.swallow.load(Ordering::Relaxed);
+    // Reconciled here so every path that ends swallowing (engine, escape chord, dead
+    // receiver) also gives the cursor back.
+    if ctx.detached.get() != swallowing {
+        detach_cursor(swallowing);
+        ctx.detached.set(swallowing);
+    }
     let deliver = match edge {
         Some((held, down)) => ctx.local.borrow_mut().deliver_locally(held, down, swallowing),
         None => !swallowing,
