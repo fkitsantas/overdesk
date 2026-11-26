@@ -4,4 +4,5 @@
 //! Translation tables are pure and compile on every OS, so CI tests them everywhere;
 //! only the thin FFI layers are `cfg`-gated.
 
+pub mod input;
 pub mod mac;
