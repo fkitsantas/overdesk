@@ -3,6 +3,7 @@
 //! See `docs/ARCHITECTURE.md` §2 and §7.
 
 #![cfg_attr(test, allow(clippy::missing_docs_in_private_items))] // test names document themselves
+pub mod discovery;
 pub mod pairing;
 pub mod session;
 pub mod store;
