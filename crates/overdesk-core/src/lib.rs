@@ -3,6 +3,8 @@
 
 use std::collections::BTreeSet;
 
+pub mod engine;
+
 pub use overdesk_proto::{Desk, DeskScreen, Os, PeerId};
 
 /// Screen rectangle in the shared logical (DPI-independent) desktop plane.
@@ -127,6 +129,24 @@ impl Switcher {
 
     pub fn active(&self) -> usize {
         self.active
+    }
+
+    pub fn layout(&self) -> &Layout {
+        &self.layout
+    }
+
+    /// Re-syncs to where the OS says the cursor is (`x`, `y` local to `screen`), clamped.
+    pub fn set_local(&mut self, screen: usize, x: i32, y: i32) {
+        let r = self.layout.screens[screen].rect;
+        let p = r.clamp((r.x as i64 + x as i64, r.y as i64 + y as i64));
+        self.active = screen;
+        self.pos = (p.0 as i32, p.1 as i32);
+    }
+
+    /// `(screen, x, y)` with `x`, `y` local to that screen.
+    pub fn local(&self) -> (usize, i32, i32) {
+        let r = self.layout.screens[self.active].rect;
+        (self.active, self.pos.0 - r.x, self.pos.1 - r.y)
     }
 
     pub fn move_by(&mut self, dx: i32, dy: i32) -> Motion {
