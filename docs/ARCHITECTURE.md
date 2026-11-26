@@ -114,6 +114,24 @@ attempt, and every failed attempt is visible to the user.
 
 Trust is strictly pairwise: replicated Desk state can never add a trusted key.
 
+### Limits against unpaired peers
+
+Any device on the network can complete a TLS handshake with its own self-signed
+certificate. Before pairing, it can only:
+
+- open **one** stream, and send frames of at most 128 bytes;
+- take up at most a few MB of buffered data;
+- hold its setup for 5 s, and a pairing for 60 s, including the user's answer.
+
+On top of that:
+- Unknown source addresses must first prove they're real (QUIC Retry).
+- At most 64 handshakes can be in progress at once.
+- Control and motion messages are refused until the peer's fingerprint is pinned.
+
+Planned with the daemon:
+- Pairing is accepted only while the user has "Pair a device" open, and only one at a time.
+- Repeated failed pairings back off.
+
 ## Status
 
 | Part | State |

@@ -22,7 +22,13 @@ pub enum SessionError {
     IdentityMismatch,
     #[error("expected Hello")]
     NoHello,
+    #[error("pairing timed out")]
+    TimedOut,
 }
+
+/// Covers the whole exchange including the user's answer, so a silent or stalled peer
+/// cannot hold a connection (and a prompt) open; keep-alives defeat the idle timeout.
+pub const PAIRING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl From<PairError> for SessionError {
     fn from(e: PairError) -> Self {
@@ -43,7 +49,18 @@ fn fresh_nonce() -> Result<Nonce, SessionError> {
 /// failures close the link. A clean decline leaves it open, because closing at once could
 /// discard our `Reject` before the peer reads it; the caller drops the link.
 pub async fn pair(link: &mut Link, confirm: impl AsyncFnOnce(u32) -> bool) -> Result<Fingerprint, SessionError> {
-    let result = pair_inner(link, confirm).await;
+    pair_with_timeout(link, confirm, PAIRING_TIMEOUT).await
+}
+
+/// [`pair`] with an explicit time limit.
+pub async fn pair_with_timeout(
+    link: &mut Link,
+    confirm: impl AsyncFnOnce(u32) -> bool,
+    limit: std::time::Duration,
+) -> Result<Fingerprint, SessionError> {
+    let result = tokio::time::timeout(limit, pair_inner(link, confirm))
+        .await
+        .unwrap_or(Err(SessionError::TimedOut));
     if matches!(result, Err(ref e) if !matches!(e, SessionError::Declined)) {
         link.close("pairing failed");
     }

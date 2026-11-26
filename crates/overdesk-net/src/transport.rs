@@ -30,6 +30,7 @@ const STREAM_PREAMBLE: u8 = 1;
 pub const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Largest pairing message is ~40 bytes; an unpaired peer gets no more than this.
 const MAX_PAIRING_FRAME: usize = 128;
+const MAX_INCOMING: usize = 64;
 
 #[derive(Debug, thiserror::Error)]
 pub enum NetError {
@@ -175,6 +176,18 @@ fn transport() -> Arc<TransportConfig> {
     let mut t = TransportConfig::default();
     t.keep_alive_interval(Some(KEEP_ALIVE));
     t.max_idle_timeout(Some(IDLE_TIMEOUT.try_into().expect("10 s fits a QUIC varint")));
+    // One control stream per connection and windows just above one frame: quinn's
+    // defaults (100+100 streams, unbounded connection window) let any peer that merely
+    // completes TLS make us buffer hundreds of megabytes.
+    let frame = MAX_FRAME_LEN as u32 + 4;
+    t.max_concurrent_bidi_streams(1u32.into());
+    t.max_concurrent_uni_streams(0u32.into());
+    t.stream_receive_window((2 * frame).into());
+    t.receive_window((2 * frame).into());
+    t.send_window(4 * frame as u64);
+    // Motion datagrams are ~15 bytes; a small buffer drops stale ones under load.
+    t.datagram_receive_buffer_size(Some(16 * 1024));
+    t.datagram_send_buffer_size(16 * 1024);
     Arc::new(t)
 }
 
@@ -198,6 +211,8 @@ impl Node {
         server.alpn_protocols = vec![ALPN.to_vec()];
         let mut server = quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server).map_err(tls)?));
         server.transport_config(transport());
+        // A desk has a handful of devices; bound handshakes in flight.
+        server.max_incoming(MAX_INCOMING);
 
         let mut client = rustls::ClientConfig::builder_with_provider(provider)
             .with_protocol_versions(&[&rustls::version::TLS13])
@@ -240,7 +255,16 @@ impl Node {
     /// Setup (handshake, control stream, preamble) is bounded by [`SETUP_TIMEOUT`].
     /// `None` once the endpoint is closed.
     pub async fn accept(&self) -> Option<impl Future<Output = Result<Link, NetError>> + use<>> {
-        let incoming = self.endpoint.accept().await?;
+        let incoming = loop {
+            let incoming = self.endpoint.accept().await?;
+            // Make unvalidated sources prove their address first (QUIC Retry), so spoofed
+            // floods cost us a stateless packet instead of a handshake.
+            if !incoming.remote_address_validated() && incoming.may_retry() {
+                let _ = incoming.retry();
+                continue;
+            }
+            break incoming;
+        };
         let local = self.local;
         Some(async move {
             let setup = async {
