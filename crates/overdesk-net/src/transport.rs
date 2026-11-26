@@ -81,6 +81,18 @@ impl Identity {
         fingerprint(&self.cert)
     }
 
+    /// `(certificate DER, PKCS#8 private key DER)` for persisting.
+    pub(crate) fn to_der(&self) -> (Vec<u8>, Vec<u8>) {
+        (self.cert.to_vec(), self.key.secret_pkcs8_der().to_vec())
+    }
+
+    pub(crate) fn from_der(cert: Vec<u8>, key: Vec<u8>) -> Self {
+        Self {
+            cert: CertificateDer::from(cert),
+            key: PrivatePkcs8KeyDer::from(key),
+        }
+    }
+
     fn key(&self) -> PrivateKeyDer<'static> {
         PrivateKeyDer::Pkcs8(self.key.clone_key())
     }

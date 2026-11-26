@@ -5,7 +5,7 @@
 //! key to the macOS Keychain / Windows DPAPI before shipping installers.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::pairing::Fingerprint;
 use crate::transport::{Identity, NetError};
@@ -14,23 +14,83 @@ pub struct Store {
     dir: PathBuf,
 }
 
+fn io(e: impl std::fmt::Display) -> NetError {
+    NetError::Io(e.to_string())
+}
+
+/// Writes via a temp file and rename, so a crash mid-write never leaves a half file.
+fn write_private(path: &Path, bytes: &[u8]) -> Result<(), NetError> {
+    let tmp = path.with_extension("tmp");
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    let mut f = opts.open(&tmp).map_err(io)?;
+    std::io::Write::write_all(&mut f, bytes).map_err(io)?;
+    f.sync_all().map_err(io)?;
+    std::fs::rename(&tmp, path).map_err(io)
+}
+
+fn hex(fp: &Fingerprint) -> String {
+    fp.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn unhex(line: &str) -> Option<Fingerprint> {
+    if line.len() != 64 || !line.is_ascii() {
+        return None;
+    }
+    let mut fp = [0u8; 32];
+    for (i, b) in fp.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&line[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(fp)
+}
+
 impl Store {
-    /// Opens (creating if needed) the store directory.
-    pub fn open(_dir: impl Into<PathBuf>) -> Result<Self, NetError> {
-        todo!()
+    /// Opens (creating if needed) the store directory, owner-only.
+    pub fn open(dir: impl Into<PathBuf>) -> Result<Self, NetError> {
+        let dir = dir.into();
+        std::fs::create_dir_all(&dir).map_err(io)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).map_err(io)?;
+        }
+        Ok(Self { dir })
     }
 
     /// Loads this device's identity, generating and saving one on first run.
     pub fn identity(&self) -> Result<Identity, NetError> {
-        todo!()
+        let (cert_path, key_path) = (self.dir.join("cert.der"), self.dir.join("key.der"));
+        match (std::fs::read(&cert_path), std::fs::read(&key_path)) {
+            (Ok(cert), Ok(key)) => Ok(Identity::from_der(cert, key)),
+            _ => {
+                let id = Identity::generate()?;
+                let (cert, key) = id.to_der();
+                write_private(&key_path, &key)?;
+                write_private(&cert_path, &cert)?;
+                Ok(id)
+            }
+        }
     }
 
     pub fn pins(&self) -> Result<BTreeSet<Fingerprint>, NetError> {
-        todo!()
+        let text = match std::fs::read_to_string(self.dir.join("pins.txt")) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+            Err(e) => return Err(io(e)),
+        };
+        text.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| unhex(l.trim()).ok_or_else(|| io(format!("bad pin line: {l:?}"))))
+            .collect()
     }
 
-    pub fn pin(&self, _fp: Fingerprint) -> Result<(), NetError> {
-        todo!()
+    pub fn pin(&self, fp: Fingerprint) -> Result<(), NetError> {
+        let mut pins = self.pins()?;
+        pins.insert(fp);
+        let text: String = pins.iter().map(|p| hex(p) + "\n").collect();
+        write_private(&self.dir.join("pins.txt"), text.as_bytes())
     }
 }
 
@@ -73,7 +133,10 @@ mod tests {
         s.pin([7; 32]).unwrap();
         s.pin([7; 32]).unwrap();
         s.pin([9; 32]).unwrap();
-        assert_eq!(Store::open(&dir).unwrap().pins().unwrap(), BTreeSet::from([[7; 32], [9; 32]]));
+        assert_eq!(
+            Store::open(&dir).unwrap().pins().unwrap(),
+            BTreeSet::from([[7; 32], [9; 32]])
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
