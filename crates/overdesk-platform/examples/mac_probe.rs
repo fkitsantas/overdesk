@@ -81,7 +81,7 @@ fn main() {
             let end = Instant::now() + Duration::from_secs(8);
             let mut seen = 0;
             while let Some(left) = end.checked_duration_since(Instant::now()) {
-                if let Ok(ev @ overdesk_platform::mac::ffi::Captured::Moved { .. }) = rx.recv_timeout(left) {
+                if let Ok(ev @ overdesk_platform::input::Captured::Moved { .. }) = rx.recv_timeout(left) {
                     println!("{ev:?}");
                     seen += 1;
                     if seen == 5 {

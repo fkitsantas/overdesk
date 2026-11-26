@@ -10,10 +10,26 @@ use overdesk_proto::{Button, Phase, ScrollUnit};
 pub enum Captured {
     /// Relative motion plus where the system cursor is now (global points), so the
     /// engine never dead-reckons the local cursor.
-    Moved { dx: i32, dy: i32, x: i32, y: i32 },
-    Button { button: Button, pressed: bool },
-    Key { code: u32, pressed: bool },
-    Scroll { dx: i32, dy: i32, unit: ScrollUnit, phase: Phase },
+    Moved {
+        dx: i32,
+        dy: i32,
+        x: i32,
+        y: i32,
+    },
+    Button {
+        button: Button,
+        pressed: bool,
+    },
+    Key {
+        code: u32,
+        pressed: bool,
+    },
+    Scroll {
+        dx: i32,
+        dy: i32,
+        unit: ScrollUnit,
+        phase: Phase,
+    },
     /// The user pressed the escape chord: local input is back, whatever the engine thinks.
     Escape,
 }
@@ -27,8 +43,15 @@ pub struct EscapeChord {
 
 impl EscapeChord {
     /// Feeds one key edge; returns `true` on the press that completes the chord.
-    pub fn key(&mut self, _code: u32, _pressed: bool) -> bool {
-        todo!()
+    pub fn key(&mut self, code: u32, pressed: bool) -> bool {
+        const ESC: u32 = 0x29;
+        if !pressed {
+            self.held.remove(&code);
+            return false;
+        }
+        let fresh = self.held.insert(code);
+        let either = |l: u32, r: u32| self.held.contains(&l) || self.held.contains(&r);
+        fresh && code == ESC && either(0xE0, 0xE4) && either(0xE2, 0xE6) && either(0xE3, 0xE7)
     }
 }
 

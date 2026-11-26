@@ -26,6 +26,7 @@ use super::events::{
     phase_from_cg, phase_to_cg,
 };
 use super::keymap::{code_to_vk, vk_to_code};
+use crate::input::EscapeChord;
 
 /// Stamped into `kCGEventSourceUserData` of every event we post, so our own tap ignores
 /// it. Every peer both captures and injects; without this, input would loop forever.
@@ -60,29 +61,7 @@ pub fn request_permissions() {
     }
 }
 
-/// Physical input seen on this Mac, in Overdesk terms.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Captured {
-    /// Relative motion, for `Switcher::move_by`.
-    Moved {
-        dx: i32,
-        dy: i32,
-    },
-    Button {
-        button: Button,
-        pressed: bool,
-    },
-    Key {
-        code: u32,
-        pressed: bool,
-    },
-    Scroll {
-        dx: i32,
-        dy: i32,
-        unit: ScrollUnit,
-        phase: Phase,
-    },
-}
+pub use crate::input::Captured;
 
 struct TapCtx {
     tx: Sender<Captured>,
@@ -90,6 +69,7 @@ struct TapCtx {
     port: OnceCell<CFRetained<CFMachPort>>,
     local: RefCell<LocalDowns>,
     sub: RefCell<Subpixel>,
+    chord: RefCell<EscapeChord>,
 }
 
 /// `kCGEventFlagMaskAlphaShift`: Caps Lock state, owned by the system, never by us.
@@ -175,6 +155,7 @@ fn run_tap(tx: Sender<Captured>, swallow: Arc<AtomicBool>, stop: Arc<AtomicBool>
         port: OnceCell::new(),
         local: RefCell::new(LocalDowns::default()),
         sub: RefCell::new(Subpixel::default()),
+        chord: RefCell::new(EscapeChord::default()),
     });
     let ctx_ptr = &*ctx as *const TapCtx as *mut c_void;
     let callback: CGEventTapCallBack = Some(tap_callback);
@@ -251,8 +232,16 @@ fn handle(ctx: &TapCtx, ty: CGEventType, ev: &CGEvent, raw: *mut CGEvent) -> *mu
     if CGEvent::integer_value_field(Some(ev), CGEventField::EventSourceUserData) == INJECTED_TAG {
         return raw;
     }
+    let edge = translate(ty, ev, ctx);
+    if let Some((Held::Key(code), down)) = edge
+        && ctx.chord.borrow_mut().key(code, down)
+    {
+        // Failsafe: give input back to this Mac before anything else can go wrong.
+        ctx.swallow.store(false, Ordering::Relaxed);
+        let _ = ctx.tx.send(Captured::Escape);
+    }
     let swallowing = ctx.swallow.load(Ordering::Relaxed);
-    let deliver = match translate(ty, ev, ctx) {
+    let deliver = match edge {
         Some((held, down)) => ctx.local.borrow_mut().deliver_locally(held, down, swallowing),
         None => !swallowing,
     };
@@ -288,7 +277,10 @@ fn other_button(n: i64) -> Option<Button> {
 /// under its timeout.
 fn translate(ty: CGEventType, ev: &CGEvent, ctx: &TapCtx) -> Option<(Held, bool)> {
     let send = |c| {
-        let _ = ctx.tx.send(c);
+        // Nobody is listening any more (engine gone): never keep swallowing input.
+        if ctx.tx.send(c).is_err() {
+            ctx.swallow.store(false, Ordering::Relaxed);
+        }
     };
     let button = |button, pressed| {
         send(Captured::Button { button, pressed });
@@ -309,7 +301,13 @@ fn translate(ty: CGEventType, ev: &CGEvent, ctx: &TapCtx) -> Option<(Held, bool)
                 CGEvent::double_value_field(Some(ev), CGEventField::MouseEventDeltaY),
             );
             if (dx, dy) != (0, 0) {
-                send(Captured::Moved { dx, dy });
+                let at = CGEvent::location(Some(ev));
+                send(Captured::Moved {
+                    dx,
+                    dy,
+                    x: at.x as i32,
+                    y: at.y as i32,
+                });
             }
             None
         }
