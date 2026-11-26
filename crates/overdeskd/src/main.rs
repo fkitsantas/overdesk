@@ -129,7 +129,7 @@ async fn ask(code: u32) -> bool {
 }
 
 /// Pins or pairs, then runs one session to its end.
-async fn session(mut link: Link, store: &Store, args: &Args, me: &Me, platform: impl Platform) {
+async fn session(mut link: Link, store: &Store, args: &Args, me: &Me, platform: impl Platform + Sync) {
     let peer = link.peer_fingerprint();
     let pinned = store.pins().unwrap_or_default();
     if !pinned.contains(&peer) {
@@ -168,7 +168,7 @@ async fn session(mut link: Link, store: &Store, args: &Args, me: &Me, platform: 
 }
 
 /// Opens the store, binds a node, then dials once or accepts sessions until stopped.
-async fn serve(args: Args, platform: impl Platform + Clone, me: Me) -> Result<(), String> {
+async fn serve(args: Args, platform: impl Platform + Clone + Sync, me: Me) -> Result<(), String> {
     let store = Store::open(store_dir()).map_err(|e| e.to_string())?;
     let id = store.identity().map_err(|e| e.to_string())?;
     let bind = args.listen.unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));

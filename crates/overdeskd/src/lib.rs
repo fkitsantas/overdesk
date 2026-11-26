@@ -10,7 +10,7 @@ pub mod native;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use overdesk_core::adopt;
 use overdesk_core::engine::{Action, Engine, Event, Mode};
@@ -73,6 +73,57 @@ pub trait Platform: Send + 'static {
     /// return a stream that ends immediately.
     fn capture(&self) -> UnboundedReceiver<Captured> {
         unbounded_channel().1
+    }
+    /// The clipboard's current text, or `None` if it is empty, holds something else or
+    /// cannot be read. May block; `run` calls it off the async threads. The default
+    /// (tests, headless) never touches a real clipboard.
+    fn clipboard_text(&self) -> Option<String> {
+        None
+    }
+    /// Replaces the clipboard's contents with `text`. May block; same default as above.
+    fn set_clipboard_text(&self, _text: &str) {}
+}
+
+/// How often the local clipboard is checked for changes.
+// shortcut: polling, a 500 ms delay and a cheap read per tick; upgrade to NSPasteboard
+// changeCount / AddClipboardFormatListener when the idle wake-ups or the delay matter.
+const CLIPBOARD_POLL: Duration = Duration::from_millis(500);
+
+/// Room kept below `MAX_FRAME_LEN` for the message tag and the text's length prefix.
+const CLIPBOARD_FRAME_OVERHEAD: usize = 16;
+
+/// Decides which local clipboard changes go to the peer.
+/// The free tier shares plain text only; images and files are Pro.
+struct ClipboardSync {
+    /// The text seen on the local clipboard at the last check.
+    seen: Option<String>,
+    /// The text the peer sent that has not yet been replaced locally; never echoed back.
+    remote: Option<String>,
+}
+
+impl ClipboardSync {
+    /// Starts from `initial`, the clipboard as it was before the session: whatever was
+    /// copied earlier is private until the user copies something during the session.
+    fn new(initial: Option<String>) -> Self {
+        Self {
+            seen: initial,
+            remote: None,
+        }
+    }
+
+    /// Feeds one local reading; returns the text to send if it is a new, sendable copy.
+    fn local_changed(&mut self, text: Option<String>) -> Option<String> {
+        if text == self.seen {
+            return None;
+        }
+        self.seen = text.clone();
+        let echo = self.remote.take() == text;
+        text.filter(|t| !echo && !t.is_empty() && t.len() + CLIPBOARD_FRAME_OVERHEAD <= overdesk_proto::MAX_FRAME_LEN)
+    }
+
+    /// Records text the peer sent, so the change it causes here is not sent back.
+    fn received(&mut self, text: &str) {
+        self.remote = Some(text.to_owned());
     }
 }
 
@@ -186,7 +237,7 @@ pub enum Ended {
 pub async fn run(
     session: Session,
     mut local: UnboundedReceiver<Captured>,
-    platform: impl Platform,
+    platform: impl Platform + Sync,
     mut on_mode: impl FnMut(Mode) + Send,
 ) -> Ended {
     let Session {
@@ -234,9 +285,55 @@ pub async fn run(
             }
         }),
     ]);
+    // Clipboard calls can block (the OS may hold the clipboard, or the text is large), so
+    // they run on the blocking pool, and polling has its own task: a slow read never
+    // delays injecting input.
+    let platform = Arc::new(platform);
+    let read = |p: Arc<_>| async move {
+        tokio::task::spawn_blocking(move || Platform::clipboard_text(&*p))
+            .await
+            .unwrap_or(None)
+    };
+    let mut clip = ClipboardSync::new(read(platform.clone()).await);
+    let (readings_tx, mut readings) = unbounded_channel::<Option<String>>();
+    let poller = platform.clone();
+    let _poll = Tasks(vec![tokio::spawn(async move {
+        let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + CLIPBOARD_POLL, CLIPBOARD_POLL);
+        loop {
+            tick.tick().await;
+            if readings_tx.send(read(poller.clone()).await).is_err() {
+                break;
+            }
+        }
+    })]);
     let epoch = Instant::now();
     let debug = std::env::var_os("OVERDESK_DEBUG").is_some();
-    while let Some(event) = queue.recv().await {
+    loop {
+        let event = tokio::select! {
+            event = queue.recv() => match event {
+                Some(event) => event,
+                None => break,
+            },
+            Some(now) = readings.recv() => {
+                if let Some(text) = clip.local_changed(now) {
+                    // A failed send means the link is going down; the reader reports the loss.
+                    let _ = tx.send_control(&Control::Clipboard { text }).await;
+                }
+                continue;
+            }
+        };
+        // The engine has no use for clipboard text, so it is handled here.
+        if let Event::Peer {
+            msg: Control::Clipboard { text },
+            ..
+        } = &event
+        {
+            clip.received(text);
+            let (p, text) = (platform.clone(), text.clone());
+            // Not awaited: a slow write must not hold up input either.
+            drop(tokio::task::spawn_blocking(move || p.set_clipboard_text(&text)));
+            continue;
+        }
         // Note the loss now: the engine consumes the event, and its cleanup actions must
         // still run before the loop stops.
         let lost = event == Event::PeerLost(peer);
@@ -289,5 +386,48 @@ pub fn to_event(c: Captured) -> Event {
         Captured::Key { code, pressed } => Event::LocalKey { code, pressed },
         Captured::Scroll { dx, dy, unit, phase } => Event::LocalScroll { dx, dy, unit, phase },
         Captured::Escape => Event::Escape,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn some(s: &str) -> Option<String> {
+        Some(s.into())
+    }
+
+    #[test]
+    fn existing_clipboard_is_not_sent_but_later_copies_are() {
+        let mut c = ClipboardSync::new(some("old"));
+        assert_eq!(c.local_changed(some("old")), None);
+        assert_eq!(c.local_changed(some("new")), some("new"));
+        assert_eq!(c.local_changed(some("new")), None, "unchanged text is sent once");
+    }
+
+    #[test]
+    fn peer_text_is_not_echoed_but_a_later_copy_of_it_is() {
+        let mut c = ClipboardSync::new(None);
+        c.received("from peer");
+        assert_eq!(c.local_changed(some("from peer")), None);
+        assert_eq!(c.local_changed(some("mine")), some("mine"));
+        assert_eq!(c.local_changed(some("from peer")), some("from peer"));
+    }
+
+    #[test]
+    fn failed_write_does_not_send_the_old_text() {
+        let mut c = ClipboardSync::new(some("old"));
+        c.received("from peer");
+        assert_eq!(c.local_changed(some("old")), None);
+    }
+
+    #[test]
+    fn empty_and_oversized_text_is_skipped() {
+        let mut c = ClipboardSync::new(None);
+        assert_eq!(c.local_changed(some("")), None);
+        assert_eq!(c.local_changed(None), None);
+        let max = overdesk_proto::MAX_FRAME_LEN - CLIPBOARD_FRAME_OVERHEAD;
+        assert_eq!(c.local_changed(Some("x".repeat(max + 1))), None);
+        assert!(c.local_changed(Some("y".repeat(max))).is_some());
     }
 }

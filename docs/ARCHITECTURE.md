@@ -190,7 +190,7 @@ managed corporate laptops.
 | Wrap-safe sequence filter for motion | ✅ |
 | `Switcher`, held keys, ⌘↔Ctrl remap | ✅ |
 | Replicated Desk state (merge and validation) | ✅ |
-| Lazy clipboard (the wire has plain text for now) | 🔜 |
+| Lazy clipboard (plain-text sync is built; lazy images and files are 🔜) | 🔜 |
 | Pairing exchange (commit-reveal, 6-digit code) | ✅ |
 | QUIC lanes: mutual TLS 1.3, control stream, motion datagrams | ✅ |
 | Saving device keys to disk, daemon | ✅ |

@@ -101,4 +101,17 @@ impl Platform for NativePlatform {
         *self.slot.lock().expect("slot lock") = Some(tx);
         rx
     }
+
+    // A fresh handle per call: arboard's macOS handle is just NSPasteboard and its Windows
+    // handle opens the clipboard only for the call, so nothing is cached or tied to the
+    // main thread, and a clipboard another app is holding fails one call, not the session.
+    fn clipboard_text(&self) -> Option<String> {
+        arboard::Clipboard::new().ok()?.get_text().ok()
+    }
+
+    fn set_clipboard_text(&self, text: &str) {
+        if let Ok(mut c) = arboard::Clipboard::new() {
+            let _ = c.set_text(text);
+        }
+    }
 }

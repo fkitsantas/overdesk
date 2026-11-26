@@ -17,6 +17,7 @@ use overdeskd::{Platform, Side, establish, run};
 struct Fake {
     log: Arc<Mutex<Vec<Action>>>,
     swallowing: Arc<Mutex<bool>>,
+    clipboard: Arc<Mutex<Option<String>>>,
 }
 
 impl Platform for Fake {
@@ -25,6 +26,12 @@ impl Platform for Fake {
     }
     fn inject(&self, action: Action) {
         self.log.lock().unwrap().push(action);
+    }
+    fn clipboard_text(&self) -> Option<String> {
+        self.clipboard.lock().unwrap().clone()
+    }
+    fn set_clipboard_text(&self, text: &str) {
+        *self.clipboard.lock().unwrap() = Some(text.into());
     }
 }
 
@@ -117,4 +124,50 @@ async fn mac_drives_pc_and_pc_cleans_up_when_mac_vanishes() {
         .await
         .expect("PC session ends")
         .unwrap();
+}
+
+#[tokio::test]
+async fn clipboard_text_follows_copies_without_echo() {
+    let (a_id, b_id) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+    let (a_fp, b_fp) = (a_id.fingerprint(), b_id.fingerprint());
+    let a_node = Node::bind(&a_id, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let b_node = Node::bind(&b_id, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = b_node.local_addr().unwrap();
+    let (a_link, b_link) = tokio::join!(a_node.connect(addr), async { b_node.accept().await.unwrap().await });
+    let me = |name: &str| Me {
+        name: name.into(),
+        os: Os::MacOs,
+        width: 1440,
+        height: 900,
+    };
+    let (a_me, b_me) = (me("a"), me("b"));
+    let (a, b) = tokio::join!(
+        establish(a_link.unwrap(), |fp| *fp == b_fp, &a_me, Side::Right),
+        establish(b_link.unwrap(), |fp| *fp == a_fp, &b_me, Side::Right),
+    );
+    let (a_fake, b_fake) = (Fake::default(), Fake::default());
+    // Copied before the session: must stay private.
+    *a_fake.clipboard.lock().unwrap() = Some("before".into());
+    let (_a_local, a_capture) = tokio::sync::mpsc::unbounded_channel();
+    let (_b_local, b_capture) = tokio::sync::mpsc::unbounded_channel();
+    let _a = tokio::spawn(run(a.unwrap(), a_capture, a_fake.clone(), |_| {}));
+    let _b = tokio::spawn(run(b.unwrap(), b_capture, b_fake.clone(), |_| {}));
+
+    // Let both sessions take their baseline reading before the first in-session copy.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    *a_fake.clipboard.lock().unwrap() = Some("hello".into());
+    let b_clip = b_fake.clipboard.clone();
+    wait_for("B to receive the text", || {
+        b_clip.lock().unwrap().as_deref() == Some("hello")
+    })
+    .await;
+
+    // B changed locally after receiving; if A's text had echoed, this would be overwritten.
+    *b_fake.clipboard.lock().unwrap() = Some("reply".into());
+    let a_clip = a_fake.clipboard.clone();
+    wait_for("A to receive the reply", || {
+        a_clip.lock().unwrap().as_deref() == Some("reply")
+    })
+    .await;
+    assert_ne!(b_fake.clipboard.lock().unwrap().as_deref(), Some("before"));
 }
