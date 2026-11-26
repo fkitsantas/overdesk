@@ -67,8 +67,8 @@ async fn mac_drives_pc_and_pc_cleans_up_when_mac_vanishes() {
     let (mac_fake, pc_fake) = (Fake::default(), Fake::default());
     let (mac_local, mac_capture) = tokio::sync::mpsc::unbounded_channel();
     let (_pc_local, pc_capture) = tokio::sync::mpsc::unbounded_channel();
-    let mac_task = tokio::spawn(run(mac, mac_capture, mac_fake.clone()));
-    let pc_task = tokio::spawn(run(pc, pc_capture, pc_fake.clone()));
+    let mac_task = tokio::spawn(run(mac, mac_capture, mac_fake.clone(), |_| {}));
+    let pc_task = tokio::spawn(run(pc, pc_capture, pc_fake.clone(), |_| {}));
 
     // Push past the Mac's right edge, then press Command.
     mac_local

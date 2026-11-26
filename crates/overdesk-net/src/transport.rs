@@ -358,6 +358,11 @@ impl Link {
         self.role
     }
 
+    /// The peer's network address, for display before its name is known.
+    pub fn remote_address(&self) -> SocketAddr {
+        self.conn.remote_address()
+    }
+
     /// Unlocks control and motion if `pinned` accepts the peer's fingerprint.
     pub fn trust(&mut self, pinned: impl Fn(&Fingerprint) -> bool) -> Result<(), NetError> {
         self.trusted = pinned(&self.peer);

@@ -8,12 +8,12 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use overdesk_core::adopt;
-use overdesk_core::engine::{Action, Engine, Event};
+use overdesk_core::engine::{Action, Engine, Event, Mode};
 use overdesk_net::pairing::{Fingerprint, peer_id};
 use overdesk_net::session::{Me, SessionError, hello};
 use overdesk_net::transport::{Link, LinkRx, LinkTx, NetError, Role};
 use overdesk_platform::input::Captured;
-use overdesk_proto::{Control, Desk, DeskScreen, PeerId};
+use overdesk_proto::{Control, Desk, DeskScreen, Os, PeerId};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::task::JoinHandle;
 
@@ -37,8 +37,11 @@ pub struct Session {
     pub engine: Engine,
     pub tx: LinkTx,
     pub rx: LinkRx,
+    pub me: PeerId,
     pub peer: PeerId,
     pub peer_name: String,
+    pub peer_os: Os,
+    pub desk: Desk,
 }
 
 /// What the OS adapter must do for the engine.
@@ -46,6 +49,11 @@ pub trait Platform: Send + 'static {
     fn swallow(&self, on: bool);
     /// Performs `Inject*` and `ReleaseAll` actions.
     fn inject(&self, action: Action);
+    /// Local input for the next session. Platforms without capture (tests, headless)
+    /// return a stream that ends immediately.
+    fn capture(&self) -> UnboundedReceiver<Captured> {
+        unbounded_channel().1
+    }
 }
 
 /// Trusts a pinned peer, exchanges `Hello`, agrees on one Desk (the dialer authors it,
@@ -118,8 +126,11 @@ pub async fn establish(
         engine,
         tx,
         rx,
+        me: mine,
         peer,
         peer_name: name,
+        peer_os: os,
+        desk,
     })
 }
 
@@ -138,8 +149,13 @@ impl Drop for Tasks {
 }
 
 /// Runs a session until the peer is lost. Leaves the platform safe: not swallowing,
-/// nothing held.
-pub async fn run(session: Session, mut local: UnboundedReceiver<Captured>, platform: impl Platform) {
+/// nothing held. `on_mode` hears every cursor-mode change.
+pub async fn run(
+    session: Session,
+    mut local: UnboundedReceiver<Captured>,
+    platform: impl Platform,
+    mut on_mode: impl FnMut(Mode) + Send,
+) {
     let Session {
         mut engine,
         mut tx,
@@ -185,7 +201,11 @@ pub async fn run(session: Session, mut local: UnboundedReceiver<Captured>, platf
         if debug {
             eprintln!("[debug] {:?} <- {event:?}", engine.mode());
         }
+        let before = engine.mode();
         let actions = engine.handle(event, epoch.elapsed().as_millis() as u64);
+        if engine.mode() != before {
+            on_mode(engine.mode());
+        }
         if debug && !actions.is_empty() {
             eprintln!("[debug]   -> {actions:?}");
         }

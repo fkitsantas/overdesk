@@ -232,7 +232,7 @@ async fn session(mut link: Link, store: &Store, args: &Args, me: &Me, platform: 
             );
             let (tx, rx) = unbounded_channel();
             *slot.lock().expect("slot lock") = Some(tx);
-            run(s, rx, platform).await;
+            run(s, rx, platform, |_| {}).await;
             *slot.lock().expect("slot lock") = None;
             println!("Disconnected.");
         }
