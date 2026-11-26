@@ -4,6 +4,7 @@
 //! live in Rust below it, so the UI can never lock anyone out.
 
 #![cfg_attr(test, allow(clippy::missing_docs_in_private_items))] // test names document themselves
+mod backdrop;
 mod desk;
 #[cfg(feature = "preview")]
 mod preview;
@@ -14,7 +15,7 @@ use std::sync::OnceLock;
 
 use iced::futures::SinkExt;
 use iced::theme::Mode as ThemeMode;
-use iced::widget::{Space, button, canvas, column, container, row, svg, text, text_input};
+use iced::widget::{Space, button, canvas, column, container, image, row, scrollable, stack, text, text_input};
 use iced::{Alignment, Element, Fill, Font, Length, Subscription, Task, Theme, font};
 use overdesk_core::engine::Mode;
 use overdesk_net::session::Me;
@@ -25,8 +26,12 @@ use tokio::sync::{mpsc, watch};
 
 /// The port the controller listens on, and the one assumed when an address has none.
 const PORT: u16 = 24801;
-/// The Overdesk symbol, drawn beside the wordmark in the header.
-const SYMBOL: &[u8] = include_bytes!("../../../assets/brand/symbol.svg");
+/// The app icon, shown large as the hero on every screen but the connected one.
+const ICON: &[u8] = include_bytes!("../../../assets/brand/app-icon-square-1024.png");
+/// The decoded icon, created once: a fresh handle per frame would re-upload the texture.
+static ICON_HANDLE: OnceLock<image::Handle> = OnceLock::new();
+/// How far content is pushed down to clear the macOS traffic lights in the merged title bar.
+const TITLE_BAR: f32 = 30.0;
 // Inter (SIL OFL 1.1, assets/fonts/Inter-LICENSE.txt): the grotesk of the wordmark,
 // identical on macOS and Windows, with a real semibold.
 /// The app's typeface, bundled so every platform renders the same.
@@ -42,11 +47,27 @@ fn main() -> iced::Result {
         .title("Overdesk")
         .subscription(App::subscription)
         .theme(App::theme)
-        .window_size((620.0, 500.0))
+        .window(window_settings())
         .font(include_bytes!("../../../assets/fonts/Inter-Regular.ttf").as_slice())
         .font(include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf").as_slice())
         .default_font(INTER)
         .run()
+}
+
+/// The window: 760x560 (never below 640x480), with a transparent title bar merged into the
+/// content on macOS so the backdrop runs to the top edge.
+fn window_settings() -> iced::window::Settings {
+    iced::window::Settings {
+        size: iced::Size::new(760.0, 560.0),
+        min_size: Some(iced::Size::new(640.0, 480.0)),
+        #[cfg(target_os = "macos")]
+        platform_specific: iced::window::settings::PlatformSpecific {
+            title_hidden: true,
+            titlebar_transparent: true,
+            fullsize_content_view: true,
+        },
+        ..iced::window::Settings::default()
+    }
 }
 
 /// A macOS privacy permission that Overdesk needs before it can start.
@@ -331,15 +352,9 @@ impl App {
         Some(style::theme(self.theme))
     }
 
-    /// The header above whichever screen is current.
+    /// The backdrop, with the current screen on top: the logo as hero, or on the connected
+    /// screen a compact header above the Desk map.
     fn view(&self) -> Element<'_, Message> {
-        let header = row![
-            svg(svg::Handle::from_memory(SYMBOL)).width(34).height(16),
-            text("Overdesk").size(17).font(bold()),
-        ]
-        .spacing(10)
-        .align_y(Alignment::Center);
-
         let body: Element<'_, Message> = match &self.screen {
             Screen::Permissions {
                 input_monitoring,
@@ -347,18 +362,58 @@ impl App {
             } => permissions_view(*input_monitoring, *accessibility),
             Screen::Starting => text("Starting…").style(muted).into(),
             Screen::Failed(e) => column![
-                text("Overdesk couldn't start").size(22).font(bold()),
-                text(e.as_str()).style(muted),
+                title("Overdesk couldn't start".into()),
+                text(e.as_str()).style(muted).align_x(Alignment::Center),
             ]
-            .spacing(8)
+            .spacing(10)
+            .align_x(Alignment::Center)
             .into(),
             Screen::Running { state, .. } => self.running_view(state),
         };
-
-        container(column![header, Space::new().height(22), body].max_width(560))
-            .padding(28)
-            .center_x(Fill)
+        let connected = matches!(
+            &self.screen,
+            Screen::Running {
+                state: AppState {
+                    phase: Phase::Connected { .. },
+                    ..
+                },
+                ..
+            }
+        );
+        let top: Element<'_, Message> = if connected {
+            row![
+                image(icon()).width(28).height(28),
+                text("Overdesk").size(17).font(bold()),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center)
             .into()
+        } else {
+            container(container(image(icon()).width(HERO).height(HERO)).style(style::logo_halo(HERO as f32 * 0.225)))
+                .center_x(Fill)
+                .into()
+        };
+        let page = column![top, Space::new().height(if connected { 20 } else { 22 }), body]
+            .max_width(560)
+            .align_x(if connected { Alignment::Start } else { Alignment::Center });
+        stack![
+            canvas(backdrop::Backdrop).width(Fill).height(Fill),
+            container(page)
+                .padding(iced::Padding {
+                    top: TITLE_BAR + 6.0,
+                    right: 32.0,
+                    bottom: 24.0,
+                    left: 32.0
+                })
+                .center_x(Fill)
+                .height(Fill)
+                .align_y(if connected {
+                    iced::alignment::Vertical::Top
+                } else {
+                    iced::alignment::Vertical::Center
+                })
+        ]
+        .into()
     }
 
     /// The screen for each controller phase.
@@ -368,33 +423,34 @@ impl App {
             Phase::Idle => self.idle_view(state),
             Phase::Connecting { address } => column![
                 title(format!("Connecting to {}…", address.ip())),
-                text("Waiting for the other computer to answer.").style(muted),
+                subtitle("Waiting for the other computer to answer."),
                 Space::new().height(18),
                 button(text("Cancel"))
-                    .padding([9, 16])
+                    .padding([10, 22])
                     .style(style::secondary)
                     .on_press(Message::Send(Command::Disconnect)),
             ]
             .spacing(8)
+            .align_x(Alignment::Center)
             .into(),
             Phase::Pairing { peer, code } => column![
                 title("Check the code".into()),
-                text(format!("Make sure {peer} shows the same code before you continue.")).style(muted),
-                Space::new().height(26),
+                subtitle(format!("Make sure {peer} shows the same code before you continue.")),
+                Space::new().height(18),
                 text(format!("{:03} {:03}", code / 1000, code % 1000))
-                    .size(64)
+                    .size(56)
                     .font(bold()),
-                Space::new().height(26),
+                Space::new().height(18),
                 if self.answered {
-                    Element::from(text(format!("Waiting for {peer} to confirm…")).style(muted))
+                    Element::from(subtitle(format!("Waiting for {peer} to confirm…")))
                 } else {
                     row![
                         button(text("Codes match"))
-                            .padding([10, 18])
+                            .padding([11, 26])
                             .style(style::primary)
                             .on_press(Message::Send(Command::AnswerCode(true))),
                         button(text("Cancel"))
-                            .padding([10, 18])
+                            .padding([11, 26])
                             .style(style::secondary)
                             .on_press(Message::Send(Command::AnswerCode(false))),
                     ]
@@ -403,6 +459,7 @@ impl App {
                 },
             ]
             .spacing(6)
+            .align_x(Alignment::Center)
             .into(),
             Phase::Connected { peer, peer_os, mode } => {
                 let status = match mode {
@@ -423,11 +480,11 @@ impl App {
                             phase: self.phase
                         })
                         .width(Fill)
-                        .height(210)
+                        .height(250)
                     )
                     .padding(6)
                     .style(style::panel),
-                    Space::new().height(14),
+                    Space::new().height(16),
                     text(status).size(17).font(bold()),
                     text(hint).style(muted),
                     Space::new().height(18),
@@ -444,7 +501,7 @@ impl App {
                         .spacing(2),
                         Space::new().width(Fill),
                         button(text("Disconnect"))
-                            .padding([9, 16])
+                            .padding([10, 22])
                             .style(style::secondary)
                             .on_press(Message::Send(Command::Disconnect)),
                     ]
@@ -455,25 +512,27 @@ impl App {
             }
             Phase::Lost { peer } => column![
                 title(format!("Lost connection to {peer}")),
-                text(format!("Your keyboard and mouse are back on this {here}.")).style(muted),
+                subtitle(format!("Your keyboard and mouse are back on this {here}.")),
                 Space::new().height(18),
                 button(text("Done"))
-                    .padding([9, 16])
+                    .padding([10, 22])
                     .style(style::secondary)
                     .on_press(Message::Send(Command::Disconnect)),
             ]
             .spacing(8)
+            .align_x(Alignment::Center)
             .into(),
             Phase::Error(message) => column![
                 title("That didn't work".into()),
-                text(message.as_str()).style(muted),
+                subtitle(message.as_str()),
                 Space::new().height(18),
                 button(text("Try again"))
-                    .padding([9, 16])
-                    .style(style::secondary)
+                    .padding([10, 22])
+                    .style(style::primary)
                     .on_press(Message::Send(Command::Disconnect)),
             ]
             .spacing(8)
+            .align_x(Alignment::Center)
             .into(),
         }
     }
@@ -484,7 +543,7 @@ impl App {
         let here = device_word(state.os);
         let side = |s: Side, label: &'static str| {
             button(text(label))
-                .padding([9, 14])
+                .padding([8, 20])
                 .style(style::segment(self.side == s))
                 .on_press(Message::Side(s))
         };
@@ -494,11 +553,13 @@ impl App {
                 text("Open Overdesk on your other computer. It will appear here.").style(muted),
             ]
             .spacing(4)
+            .width(Fill)
+            .align_x(Alignment::Center)
             .into()
         } else {
             column(state.nearby.iter().map(|d| {
                 let go = button(text(if d.paired { "Connect" } else { "Pair" }))
-                    .padding([8, 16])
+                    .padding([8, 20])
                     .style(style::primary)
                     .on_press(Message::Send(Command::Connect {
                         address: d.address,
@@ -510,20 +571,37 @@ impl App {
                 if d.paired {
                     info = info.push(text("Paired").color(style::TEAL));
                 }
-                row![
-                    column![text(d.name.as_str()).font(bold()), info].spacing(2),
-                    Space::new().width(Fill),
-                    go,
-                ]
-                .align_y(Alignment::Center)
+                let initial = d.name.chars().next().map_or(' ', |c| c.to_ascii_uppercase());
+                let initial = if d.os == Os::Windows {
+                    'W'
+                } else if d.os == Os::MacOs {
+                    'M'
+                } else {
+                    initial
+                };
+                container(
+                    row![
+                        container(text(initial.to_string()).size(15).font(bold()))
+                            .center(38)
+                            .style(style::glyph),
+                        column![text(d.name.as_str()).font(bold()), info].spacing(2),
+                        Space::new().width(Fill),
+                        go,
+                    ]
+                    .spacing(14)
+                    .align_y(Alignment::Center),
+                )
+                .padding([12, 16])
+                .width(Fill)
+                .style(style::panel)
                 .into()
             }))
-            .spacing(14)
+            .spacing(10)
             .into()
         };
 
         let valid = parse_address(&self.address).is_some();
-        let connect = button(text("Connect")).padding([9, 18]).style(style::primary);
+        let connect = button(text("Connect")).padding([9, 22]).style(style::primary);
         let connect = if valid {
             connect.on_press(Message::Connect)
         } else {
@@ -542,7 +620,8 @@ impl App {
             .style(style::secondary)
             .on_press(Message::ToggleAddress)
         ]
-        .spacing(10);
+        .spacing(10)
+        .align_x(Alignment::Center);
         if self.show_address {
             fallback = fallback.push(
                 row![
@@ -560,24 +639,46 @@ impl App {
 
         column![
             title("Pair a device".into()),
-            text(format!("Share this {here}'s keyboard and mouse with another computer.")).style(muted),
-            Space::new().height(18),
+            subtitle(format!("Share this {here}'s keyboard and mouse with another computer.")),
+            Space::new().height(10),
             text(format!("Where is it, next to this {here}?")).size(13).style(muted),
             row![side(Side::Left, "On the left"), side(Side::Right, "On the right")].spacing(8),
-            Space::new().height(8),
-            text("Nearby computers").font(bold()),
-            container(nearby).padding(18).width(Fill).style(style::panel),
-            Space::new().height(8),
+            Space::new().height(6),
+            // Two rows fit without scrolling; more scroll inside a fixed band so the
+            // fallback button never falls off the bottom of the window.
+            column![
+                text("Nearby computers").font(bold()),
+                container(scrollable(nearby).spacing(4)).max_height(NEARBY_MAX_HEIGHT)
+            ]
+            .spacing(8)
+            .width(Fill),
             fallback,
         ]
         .spacing(6)
+        .align_x(Alignment::Center)
         .into()
     }
 }
 
 /// A screen title: large and semibold.
 fn title<'a>(s: String) -> iced::widget::Text<'a> {
-    text(s).size(22).font(bold())
+    text(s).size(29).font(bold()).align_x(Alignment::Center)
+}
+
+/// Muted supporting text under a title, centred.
+fn subtitle<'a>(s: impl text::IntoFragment<'a>) -> iced::widget::Text<'a> {
+    text(s).style(muted).align_x(Alignment::Center)
+}
+
+/// The tallest the Nearby list grows before it scrolls: two rows and their spacing.
+const NEARBY_MAX_HEIGHT: f32 = 156.0;
+
+/// The hero logo's edge length, in pixels.
+const HERO: u32 = 72;
+
+/// The decoded app icon, shared across frames.
+fn icon() -> image::Handle {
+    ICON_HANDLE.get_or_init(|| image::Handle::from_bytes(ICON)).clone()
 }
 
 /// Inter Semibold, for titles and emphasis.
@@ -617,13 +718,13 @@ fn permissions_view<'a>(input_monitoring: bool, accessibility: bool) -> Element<
             .spacing(12)
             .align_y(Alignment::Center),
         )
-        .padding(16)
+        .padding([12, 16])
         .style(style::panel)
     };
     column![
         title("Overdesk needs two permissions".into()),
-        text("macOS asks you to approve these once. Overdesk never records or stores what you type.").style(muted),
-        Space::new().height(18),
+        subtitle("macOS asks you to approve these once. Overdesk never records or stores what you type."),
+        Space::new().height(8),
         item(
             input_monitoring,
             "Input Monitoring",
@@ -636,12 +737,12 @@ fn permissions_view<'a>(input_monitoring: bool, accessibility: bool) -> Element<
             "Lets your other computers type and click on this Mac.",
             Permission::Accessibility
         ),
-        Space::new().height(18),
+        Space::new().height(8),
         row![
             text("After granting both, reopen Overdesk.").style(muted),
             Space::new().width(Fill),
             button(text("Reopen Overdesk"))
-                .padding([9, 16])
+                .padding([10, 22])
                 .style(style::primary)
                 .on_press(Message::Relaunch),
         ]
@@ -649,6 +750,7 @@ fn permissions_view<'a>(input_monitoring: bool, accessibility: bool) -> Element<
     ]
     .spacing(10)
     .width(Length::Fill)
+    .align_x(Alignment::Center)
     .into()
 }
 

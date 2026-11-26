@@ -12,7 +12,7 @@ name = "overdesk"
 path = "src/main.rs"
 
 [dependencies]
-iced = { version = "0.14.0", features = ["tokio", "canvas", "svg", "advanced"] }
+iced = { version = "0.14.0", features = ["tokio", "canvas", "svg", "advanced", "image"] }
 overdesk-core = { path = "../overdesk-core" }
 overdesk-net = { path = "../overdesk-net" }
 overdesk-proto.workspace = true

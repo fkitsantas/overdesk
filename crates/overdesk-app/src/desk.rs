@@ -8,7 +8,7 @@ use iced::{Point, Rectangle, Renderer, Size, Theme, alignment};
 use overdesk_core::engine::Mode;
 use overdeskd::controller::ScreenView;
 
-use crate::style::{INDIGO, TEAL, VIOLET, alpha, hairline, ink, muted};
+use crate::style::{INDIGO, INK, TEAL, VIOLET, alpha, hairline, ink, is_dark, muted};
 
 /// The Desk map widget: draws the shared Desk's screens, scaled to fit, on a canvas.
 pub struct DeskMap<'a> {
@@ -21,9 +21,9 @@ pub struct DeskMap<'a> {
 }
 
 /// The space between neighbouring screens, in pixels.
-const GAP: f32 = 16.0;
+const GAP: f32 = 24.0;
 /// The margin around the drawn Desk, in pixels.
-const PAD: f32 = 12.0;
+const PAD: f32 = 20.0;
 
 impl<Message> Program<Message> for DeskMap<'_> {
     type State = ();
@@ -81,10 +81,44 @@ impl<Message> Program<Message> for DeskMap<'_> {
         let active_is_me = !matches!(self.mode, Mode::Driving(_));
         for (r, s) in &rects {
             let on = s.me == active_is_me;
-            let shape = Path::rounded_rectangle(r.position(), r.size(), 12.0.into());
-            frame.fill(&shape, if on { alpha(TEAL, 0.12) } else { alpha(ink(theme), 0.04) });
+            let face = Path::rounded_rectangle(r.position(), r.size(), 12.0.into());
+            // Depth: a soft shadow below, then a slightly larger bezel behind the face.
+            for i in 0..4 {
+                let grow = i as f32 * 3.0;
+                let soft = Path::rounded_rectangle(
+                    Point::new(r.x - grow, r.y + 8.0 - grow),
+                    Size::new(r.width + 2.0 * grow, r.height + 2.0 * grow),
+                    (12.0 + grow).into(),
+                );
+                frame.fill(&soft, alpha(INK, if is_dark(theme) { 0.07 } else { 0.025 }));
+            }
+            let bezel = Path::rounded_rectangle(
+                Point::new(r.x - 4.0, r.y - 4.0),
+                Size::new(r.width + 8.0, r.height + 8.0),
+                16.0.into(),
+            );
+            frame.fill(&bezel, alpha(ink(theme), if is_dark(theme) { 0.1 } else { 0.05 }));
+            frame.stroke(&bezel, Stroke::default().with_color(hairline(theme)).with_width(1.0));
+            if on {
+                // The glow: strokes that grow outward while fading, around the teal outline.
+                for i in 1..=6 {
+                    let grow = 4.0 + i as f32 * 2.5;
+                    let halo = Path::rounded_rectangle(
+                        Point::new(r.x - grow, r.y - grow),
+                        Size::new(r.width + 2.0 * grow, r.height + 2.0 * grow),
+                        (12.0 + grow).into(),
+                    );
+                    frame.stroke(
+                        &halo,
+                        Stroke::default()
+                            .with_color(alpha(TEAL, 0.2 / i as f32))
+                            .with_width(2.5),
+                    );
+                }
+            }
+            frame.fill(&face, if on { alpha(TEAL, 0.14) } else { alpha(ink(theme), 0.04) });
             frame.stroke(
-                &shape,
+                &if on { bezel.clone() } else { face.clone() },
                 Stroke::default()
                     .with_color(if on { TEAL } else { hairline(theme) })
                     .with_width(if on { 2.0 } else { 1.0 }),
@@ -130,7 +164,7 @@ impl<Message> Program<Message> for DeskMap<'_> {
                 &ribbon,
                 Stroke {
                     style: canvas::Style::Gradient(gradient.into()),
-                    width: 4.0,
+                    width: 6.0,
                     line_cap: canvas::LineCap::Round,
                     ..Stroke::default()
                 },
@@ -143,7 +177,7 @@ impl<Message> Program<Message> for DeskMap<'_> {
                     &ribbon,
                     Stroke {
                         style: canvas::Style::Solid(alpha(iced::Color::WHITE, 0.9)),
-                        width: 2.0,
+                        width: 2.5,
                         line_cap: canvas::LineCap::Round,
                         line_dash: canvas::LineDash {
                             segments: &[6.0, 14.0],
