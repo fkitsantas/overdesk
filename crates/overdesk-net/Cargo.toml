@@ -27,4 +27,4 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 workspace = true
 
 [dev-dependencies]
-tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "time", "io-util"] }

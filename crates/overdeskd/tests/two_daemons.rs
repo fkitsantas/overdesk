@@ -8,7 +8,7 @@ use overdesk_core::engine::Action;
 use overdesk_net::session::Me;
 use overdesk_net::transport::{Identity, Node};
 use overdesk_platform::input::Captured;
-use overdesk_proto::Os;
+use overdesk_proto::{ClipItem, ClipKind, Control, Os};
 use overdeskd::{Platform, Side, establish, run};
 
 /// A platform that records every injected action and the swallow flag, so tests can
@@ -170,4 +170,56 @@ async fn clipboard_text_follows_copies_without_echo() {
     })
     .await;
     assert_ne!(b_fake.clipboard.lock().unwrap().as_deref(), Some("before"));
+}
+
+#[tokio::test]
+async fn free_daemon_ignores_image_and_file_offers() {
+    let (a_id, b_id) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+    let (a_fp, b_fp) = (a_id.fingerprint(), b_id.fingerprint());
+    let a_node = Node::bind(&a_id, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let b_node = Node::bind(&b_id, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = b_node.local_addr().unwrap();
+    let (a_link, b_link) = tokio::join!(a_node.connect(addr), async { b_node.accept().await.unwrap().await });
+    let me = |name: &str| Me {
+        name: name.into(),
+        os: Os::MacOs,
+        width: 1440,
+        height: 900,
+    };
+    let (a_me, b_me) = (me("a"), me("b"));
+    let (a, b) = tokio::join!(
+        establish(a_link.unwrap(), |fp| *fp == b_fp, &a_me, Side::Right),
+        establish(b_link.unwrap(), |fp| *fp == a_fp, &b_me, Side::Right),
+    );
+    // Only B runs the daemon; A is a bare peer that sends what a Pro peer would.
+    let mut a = a.unwrap();
+    let b_fake = Fake::default();
+    let (_b_local, b_capture) = tokio::sync::mpsc::unbounded_channel();
+    let b_task = tokio::spawn(run(b.unwrap(), b_capture, b_fake.clone(), |_| {}));
+    for msg in [
+        Control::ClipOffer {
+            id: [1; 16],
+            kind: ClipKind::Files,
+            items: vec![ClipItem {
+                name: "a.txt".into(),
+                size: 5,
+            }],
+        },
+        Control::ClipGet { id: [1; 16] },
+        Control::ClipCancel { id: [1; 16] },
+    ] {
+        a.tx.send_control(&msg).await.unwrap();
+    }
+    // The session still works afterwards: text arrives and the daemon is still running.
+    a.tx.send_control(&Control::Clipboard {
+        text: "still here".into(),
+    })
+    .await
+    .unwrap();
+    let b_clip = b_fake.clipboard.clone();
+    wait_for("B to receive text after the offers", || {
+        b_clip.lock().unwrap().as_deref() == Some("still here")
+    })
+    .await;
+    assert!(!b_task.is_finished(), "the offers ended the session");
 }

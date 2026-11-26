@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! The real OS adapter. macOS, Windows and Linux expose the same `Capture` / `Injector` API.
 
+use std::path::PathBuf;
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 
@@ -118,6 +119,37 @@ impl Platform for NativePlatform {
     fn set_clipboard_text(&self, text: &str) {
         if let Ok(mut c) = arboard::Clipboard::new() {
             let _ = c.set_text(text);
+        }
+    }
+
+    fn clipboard_image(&self) -> Option<(u32, u32, Vec<u8>)> {
+        if overdesk_platform::clipboard_is_private() {
+            return None;
+        }
+        let img = arboard::Clipboard::new().ok()?.get_image().ok()?;
+        Some((img.width as u32, img.height as u32, img.bytes.into_owned()))
+    }
+
+    fn set_clipboard_image(&self, width: u32, height: u32, rgba: Vec<u8>) {
+        if let Ok(mut c) = arboard::Clipboard::new() {
+            let _ = c.set_image(arboard::ImageData {
+                width: width as usize,
+                height: height as usize,
+                bytes: rgba.into(),
+            });
+        }
+    }
+
+    fn clipboard_files(&self) -> Option<Vec<PathBuf>> {
+        if overdesk_platform::clipboard_is_private() {
+            return None;
+        }
+        arboard::Clipboard::new().ok()?.get().file_list().ok()
+    }
+
+    fn set_clipboard_files(&self, files: &[PathBuf]) {
+        if let Ok(mut c) = arboard::Clipboard::new() {
+            let _ = c.set().file_list(files);
         }
     }
 }

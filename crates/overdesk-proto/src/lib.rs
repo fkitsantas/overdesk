@@ -181,6 +181,45 @@ pub enum Control {
         /// Clipboard contents as UTF-8 text; bounded by [`MAX_FRAME_LEN`].
         text: String,
     },
+    /// The sender copied non-text content and offers it. Nothing is sent until the
+    /// receiver answers with [`Control::ClipGet`]. Free builds ignore it; sharing is a
+    /// Pro feature (ARCHITECTURE §6).
+    ClipOffer {
+        /// Random id naming this offer; the transfer stream carries the same id.
+        id: [u8; 16],
+        /// What the offer holds.
+        kind: ClipKind,
+        /// The items on offer: one image, or the copied files.
+        items: Vec<ClipItem>,
+    },
+    /// The receiver wants the content of offer `id`; the sender then opens a transfer stream.
+    ClipGet {
+        /// Id of the [`Control::ClipOffer`] being requested.
+        id: [u8; 16],
+    },
+    /// Withdraws offer `id`, or abandons its transfer; either side may send it.
+    ClipCancel {
+        /// Id of the offer or transfer being dropped.
+        id: [u8; 16],
+    },
+}
+
+/// What a [`Control::ClipOffer`] holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClipKind {
+    /// One image.
+    Image,
+    /// One or more files.
+    Files,
+}
+
+/// One item of a [`Control::ClipOffer`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipItem {
+    /// File name without any directory part, or a label for an image.
+    pub name: String,
+    /// Size in bytes of the item's content.
+    pub size: u64,
 }
 
 /// One screen in the shared logical plane, owned by `peer`.
@@ -397,6 +436,21 @@ mod tests {
             Control::Clipboard {
                 text: "héllo 🌍".into(),
             },
+            Control::ClipOffer {
+                id: [9; 16],
+                kind: ClipKind::Files,
+                items: vec![ClipItem {
+                    name: "a.txt".into(),
+                    size: u64::MAX,
+                }],
+            },
+            Control::ClipOffer {
+                id: [1; 16],
+                kind: ClipKind::Image,
+                items: vec![],
+            },
+            Control::ClipGet { id: [2; 16] },
+            Control::ClipCancel { id: [3; 16] },
         ]
     }
 
@@ -406,6 +460,47 @@ mod tests {
             let frame = encode_frame(&msg).unwrap();
             assert_eq!(decode_frame::<Control>(&frame), Ok(Some((msg, frame.len()))));
         }
+    }
+
+    #[test]
+    fn existing_variants_keep_their_encoding() {
+        // Captured before ClipOffer/ClipGet/ClipCancel were appended; variant indices must not move.
+        let enc = |m: &Control| encode_frame(m).unwrap();
+        assert_eq!(enc(&Control::Key { code: 4, pressed: true }), [0, 0, 0, 3, 5, 4, 1]);
+        let mut focus = vec![0, 0, 0, 21, 1];
+        focus.extend([7; 16]);
+        focus.extend([0, 184, 8, 7]);
+        assert_eq!(
+            enc(&Control::Focus {
+                peer: PEER,
+                x: 0,
+                y: 540,
+                seq: 7
+            }),
+            focus
+        );
+        let scroll = Control::Scroll {
+            dx: 0,
+            dy: -120,
+            unit: ScrollUnit::Notch120,
+            phase: Phase::None,
+        };
+        assert_eq!(enc(&scroll), [0, 0, 0, 6, 3, 0, 239, 1, 1, 0]);
+        assert_eq!(
+            enc(&Control::Clipboard { text: "hi".into() }),
+            [0, 0, 0, 4, 7, 2, 104, 105]
+        );
+        let desk = Control::Desk(Desk {
+            version: 1,
+            author: PEER,
+            screens: vec![],
+        });
+        let mut expected = vec![0, 0, 0, 19, 6, 1];
+        expected.extend([7; 16]);
+        expected.push(0);
+        assert_eq!(enc(&desk), expected);
+        // The new variants follow the last old one.
+        assert_eq!(enc(&Control::ClipGet { id: [0; 16] })[4], 9);
     }
 
     #[test]

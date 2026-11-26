@@ -88,6 +88,20 @@ A peer whose clipboard changes **announces** the formats it holds (text, image, 
 Bytes cross the wire only when another peer actually pastes, so copying a 50 MB image
 costs nothing until it's used.
 
+As shipped: text still travels inline as `Control::Clipboard`. Images and files use
+**offer / get**: the owner sends `ClipOffer { id, kind, items }` (names and sizes only),
+the receiver answers `ClipGet { id }` when the user pastes, and either side may send
+`ClipCancel { id }`. The bytes then move on a **transfer stream**: a QUIC uni stream
+that starts with the 16-byte `id` followed by raw content and ends with the stream's
+finish. It is separate from the control stream and capped at one at a time, with a
+connection window of four frames against two per stream, so a transfer cannot starve
+input. Nodes accept transfer streams only when bound with `Node::bind_with_transfers`;
+a default node grants no uni-stream credit, so a peer cannot open one at all.
+
+The open core ships only this plumbing (message types, transfer streams, platform
+clipboard image/file access). **Free is text-only**: its daemon ignores offers and never
+offers anything. Sharing images and files is **Pro**, implemented outside this repository.
+
 ## 7. Pairing
 
 Each device has a long-lived key pair inside a self-signed certificate. Its `PeerId` is

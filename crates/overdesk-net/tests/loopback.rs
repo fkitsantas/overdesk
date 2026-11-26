@@ -2,7 +2,9 @@
 //! Two real QUIC peers over 127.0.0.1.
 
 use std::future::Future;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use overdesk_net::pairing::peer_id;
 use overdesk_net::session::{Me, SessionError, hello, pair, pair_with_timeout};
@@ -32,9 +34,14 @@ struct Pair {
 
 /// Binds two nodes on ephemeral ports and connects them. Neither link is trusted yet.
 async fn connected() -> Pair {
+    connected_with([false, false]).await
+}
+
+/// Like [`connected`], with the transfer option set per side: `[dialer, listener]`.
+async fn connected_with(transfers: [bool; 2]) -> Pair {
     let (dialer_id, listener_id) = (Identity::generate().unwrap(), Identity::generate().unwrap());
-    let a = Node::bind(&dialer_id, "127.0.0.1:0".parse().unwrap()).unwrap();
-    let b = Node::bind(&listener_id, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let a = Node::bind_with_transfers(&dialer_id, "127.0.0.1:0".parse().unwrap(), transfers[0]).unwrap();
+    let b = Node::bind_with_transfers(&listener_id, "127.0.0.1:0".parse().unwrap(), transfers[1]).unwrap();
     let addr = b.local_addr().unwrap();
     let (dialer, listener) = tokio::join!(a.connect(addr), async { b.accept().await.unwrap().await });
     Pair {
@@ -48,7 +55,12 @@ async fn connected() -> Pair {
 
 /// Both sides already paired: each trusts exactly the other's fingerprint.
 async fn trusted() -> Pair {
-    let mut p = connected().await;
+    trusted_with([false, false]).await
+}
+
+/// Like [`trusted`], with the transfer option set per side: `[dialer, listener]`.
+async fn trusted_with(transfers: [bool; 2]) -> Pair {
+    let mut p = connected_with(transfers).await;
     let (dfp, lfp) = (p.dialer_id.fingerprint(), p.listener_id.fingerprint());
     p.dialer.trust(|fp| *fp == lfp).unwrap();
     p.listener.trust(|fp| *fp == dfp).unwrap();
@@ -378,4 +390,68 @@ async fn only_trusted_links_split() {
         assert!(matches!(p.dialer.split(), Err(NetError::Untrusted)));
     })
     .await;
+}
+
+#[tokio::test]
+async fn a_32_mib_transfer_does_not_starve_control() {
+    const TOTAL: usize = 32 * 1024 * 1024;
+    let p = trusted_with([true, true]).await;
+    let (mut dtx, _drx) = p.dialer.split().unwrap();
+    let (_ltx, mut lrx) = p.listener.split().unwrap();
+    let incoming = lrx.transfers();
+    let id = [7u8; 16];
+    let writer = dtx.open_transfer(id).await.unwrap();
+    let sender = tokio::spawn(async move {
+        let mut w = writer;
+        let chunk = vec![0xA5u8; 64 * 1024];
+        for _ in 0..TOTAL / chunk.len() {
+            w.write_all(&chunk).await.unwrap();
+        }
+        w.shutdown().await.unwrap();
+    });
+    let receiver = tokio::spawn(async move {
+        let (got, mut r) = incoming.accept().await.unwrap();
+        let mut all = Vec::new();
+        r.read_to_end(&mut all).await.unwrap();
+        (got, all)
+    });
+    // Control keeps flowing while the bytes move: each round trip stays well under a second.
+    let started = Instant::now();
+    let mut slowest = Duration::ZERO;
+    while !sender.is_finished() {
+        let t = Instant::now();
+        dtx.send_control(&Control::Key { code: 4, pressed: true })
+            .await
+            .unwrap();
+        assert_eq!(
+            lrx.recv_control().await.unwrap(),
+            Control::Key { code: 4, pressed: true }
+        );
+        slowest = slowest.max(t.elapsed());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(slowest < Duration::from_millis(500), "control stalled for {slowest:?}");
+    sender.await.unwrap();
+    let (got, all) = receiver.await.unwrap();
+    assert_eq!((got, all.len()), (id, TOTAL));
+    assert!(all.iter().all(|b| *b == 0xA5));
+    println!("32 MiB in {:?}, slowest control hop {slowest:?}", started.elapsed());
+}
+
+#[tokio::test]
+async fn a_free_node_refuses_transfer_streams() {
+    let p = trusted_with([true, false]).await;
+    // The dialer allows transfers, the listener is a default (Free) node: it grants no stream credit.
+    let opened = tokio::time::timeout(Duration::from_millis(500), p.dialer.open_transfer([1; 16])).await;
+    assert!(opened.is_err(), "a Free node accepted a transfer stream");
+}
+
+#[tokio::test]
+async fn untrusted_links_cannot_open_or_accept_transfers() {
+    let p = connected_with([true, true]).await;
+    assert!(matches!(
+        p.dialer.open_transfer([1; 16]).await,
+        Err(NetError::Untrusted)
+    ));
+    assert!(matches!(p.listener.accept_transfer().await, Err(NetError::Untrusted)));
 }

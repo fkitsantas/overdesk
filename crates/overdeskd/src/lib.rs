@@ -8,6 +8,7 @@ pub mod controller;
 pub mod native;
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -82,6 +83,19 @@ pub trait Platform: Send + 'static {
     }
     /// Replaces the clipboard's contents with `text`. May block; same default as above.
     fn set_clipboard_text(&self, _text: &str) {}
+    /// The clipboard's current image as `(width, height, RGBA bytes)`, or `None` if it
+    /// holds none. Open-core plumbing for Pro: `run` never calls it, so Free stays text-only.
+    fn clipboard_image(&self) -> Option<(u32, u32, Vec<u8>)> {
+        None
+    }
+    /// Replaces the clipboard's contents with an RGBA image. Pro plumbing, like above.
+    fn set_clipboard_image(&self, _width: u32, _height: u32, _rgba: Vec<u8>) {}
+    /// The files currently copied in the file manager, or `None`. Pro plumbing, like above.
+    fn clipboard_files(&self) -> Option<Vec<PathBuf>> {
+        None
+    }
+    /// Replaces the clipboard's contents with a list of files. Pro plumbing, like above.
+    fn set_clipboard_files(&self, _files: &[PathBuf]) {}
 }
 
 /// How often the local clipboard is checked for changes.
@@ -370,6 +384,15 @@ pub async fn run(
             let (p, text) = (platform.clone(), text.clone());
             // Not awaited: a slow write must not hold up input either.
             drop(tokio::task::spawn_blocking(move || p.set_clipboard_text(&text)));
+            continue;
+        }
+        // Image and file offers are Pro-only: Free neither answers nor forwards them, and
+        // ignoring them keeps the link and the session intact.
+        if let Event::Peer {
+            msg: Control::ClipOffer { .. } | Control::ClipGet { .. } | Control::ClipCancel { .. },
+            ..
+        } = &event
+        {
             continue;
         }
         // Note the loss now: the engine consumes the event, and its cleanup actions must

@@ -15,6 +15,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, Serve
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
 use serde::{Serialize, de::DeserializeOwned};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::pairing::{Fingerprint, fingerprint};
 
@@ -254,8 +255,11 @@ impl ClientCertVerifier for PinLater {
 
 /// QUIC transport settings shared by the server and client sides: liveness timers,
 /// tight flow-control windows and small datagram buffers, sized for one control stream
-/// and a trickle of motion datagrams.
-fn transport() -> Arc<TransportConfig> {
+/// and a trickle of motion datagrams. With `transfers`, the peer may also open one
+/// inbound uni stream (see [`Link::open_transfer`]) and the connection window grows to
+/// four frames, so a bulk transfer filling its own two-frame stream window still leaves
+/// room for control frames.
+fn transport(transfers: bool) -> Arc<TransportConfig> {
     let mut t = TransportConfig::default();
     t.keep_alive_interval(Some(KEEP_ALIVE));
     t.max_idle_timeout(Some(IDLE_TIMEOUT.try_into().expect("3 s fits a QUIC varint")));
@@ -265,9 +269,9 @@ fn transport() -> Arc<TransportConfig> {
     // completes TLS make us buffer hundreds of megabytes.
     let frame = MAX_FRAME_LEN as u32 + 4;
     t.max_concurrent_bidi_streams(1u32.into());
-    t.max_concurrent_uni_streams(0u32.into());
+    t.max_concurrent_uni_streams(u32::from(transfers).into());
     t.stream_receive_window((2 * frame).into());
-    t.receive_window((2 * frame).into());
+    t.receive_window(((if transfers { 4 } else { 2 }) * frame).into());
     t.send_window(4 * frame as u64);
     // Motion datagrams are ~15 bytes; a small buffer drops stale ones under load.
     t.datagram_receive_buffer_size(Some(16 * 1024));
@@ -298,6 +302,17 @@ impl Node {
     /// a key that does not match the certificate) and [`NetError::Io`] if the socket
     /// cannot be bound.
     pub fn bind(identity: &Identity, addr: SocketAddr) -> Result<Self, NetError> {
+        Self::bind_with_transfers(identity, addr, false)
+    }
+
+    /// Like [`Node::bind`], and with `transfers` the peer may open one transfer stream
+    /// at a time to this node ([`Link::accept_transfer`]). Off in [`Node::bind`]: such a
+    /// node resets every uni stream, which keeps Free limits exactly.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Node::bind`].
+    pub fn bind_with_transfers(identity: &Identity, addr: SocketAddr, transfers: bool) -> Result<Self, NetError> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let verifier = Arc::new(PinLater(provider.clone()));
 
@@ -309,7 +324,7 @@ impl Node {
             .map_err(tls)?;
         server.alpn_protocols = vec![ALPN.to_vec()];
         let mut server = quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server).map_err(tls)?));
-        server.transport_config(transport());
+        server.transport_config(transport(transfers));
         // A desk has a handful of devices; bound handshakes in flight.
         server.max_incoming(MAX_INCOMING);
 
@@ -323,7 +338,7 @@ impl Node {
             .map_err(tls)?;
         client.alpn_protocols = vec![ALPN.to_vec()];
         let mut client = quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(client).map_err(tls)?));
-        client.transport_config(transport());
+        client.transport_config(transport(transfers));
 
         let mut endpoint = Endpoint::server(server, addr).map_err(io)?;
         endpoint.set_default_client_config(client);
@@ -614,6 +629,33 @@ impl Link {
         Ok(decode_motion(&d)?)
     }
 
+    /// Opens a transfer stream: raw bytes for the content named `id`, written to the
+    /// returned writer; shutting it down ends the transfer. Needs a peer node bound with
+    /// [`Node::bind_with_transfers`]. The open-core app never calls it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::Untrusted`] before [`Link::trust`] succeeds and
+    /// [`NetError::Closed`] if the link is gone. Against a peer without transfers it
+    /// never completes: bound it with a timeout.
+    pub async fn open_transfer(&self, id: [u8; 16]) -> Result<impl AsyncWrite + Unpin + use<>, NetError> {
+        self.require_trust()?;
+        open_transfer(&self.conn, id).await
+    }
+
+    /// Waits for the peer's next transfer stream; returns its id and a reader of the
+    /// content, which ends when the peer finishes. Needs this node bound with
+    /// [`Node::bind_with_transfers`], else it never yields.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::Untrusted`] before [`Link::trust`] succeeds and
+    /// [`NetError::Closed`] once the connection is gone.
+    pub async fn accept_transfer(&self) -> Result<([u8; 16], impl AsyncRead + Unpin + use<>), NetError> {
+        self.require_trust()?;
+        accept_transfer(&self.conn).await
+    }
+
     /// Closes the connection immediately, sending `reason` to the peer. Data still
     /// queued on the control stream may be discarded.
     pub fn close(&self, reason: &str) {
@@ -672,6 +714,32 @@ async fn read_frame<T: DeserializeOwned>(
     }
 }
 
+/// Opens a uni stream on `conn` and writes the 16-byte transfer `id`; the caller writes
+/// the content and shuts the writer down to end it.
+///
+/// # Errors
+///
+/// Returns [`NetError::Closed`] if the connection is gone. Against a peer bound without
+/// transfers it never completes (no stream credit): bound it with a timeout.
+async fn open_transfer(conn: &Connection, id: [u8; 16]) -> Result<impl AsyncWrite + Unpin + use<>, NetError> {
+    let mut send = conn.open_uni().await.map_err(closed)?;
+    send.write_all(&id).await.map_err(closed)?;
+    Ok(send)
+}
+
+/// Waits for the peer's next transfer stream and reads its 16-byte id. Not cancel-safe
+/// once a stream has arrived: dropping it mid-way discards that transfer.
+///
+/// # Errors
+///
+/// Returns [`NetError::Closed`] if the connection is gone or the stream ends before its id.
+async fn accept_transfer(conn: &Connection) -> Result<([u8; 16], impl AsyncRead + Unpin + use<>), NetError> {
+    let mut recv = conn.accept_uni().await.map_err(closed)?;
+    let mut id = [0u8; 16];
+    recv.read_exact(&mut id).await.map_err(|e| closed_on(conn, e))?;
+    Ok((id, recv))
+}
+
 /// Writer half of a trusted [`Link`].
 ///
 /// Trust was checked when the link was split, so its methods do not check again.
@@ -700,6 +768,16 @@ impl LinkTx {
     /// Returns [`NetError::Closed`] if the datagram cannot be sent.
     pub fn send_motion(&self, m: &Motion) -> Result<(), NetError> {
         self.conn.send_datagram(encode_motion(m).into()).map_err(closed)
+    }
+
+    /// Opens a transfer stream; see [`Link::open_transfer`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::Closed`] if the link is gone; never completes against a peer
+    /// without transfers.
+    pub async fn open_transfer(&self, id: [u8; 16]) -> Result<impl AsyncWrite + Unpin + use<>, NetError> {
+        open_transfer(&self.conn, id).await
     }
 
     /// A handle that can close this link from another task.
@@ -746,6 +824,14 @@ impl LinkRx {
         Ok(decode_motion(&d)?)
     }
 
+    /// A separate transfer acceptor, so incoming transfers can be awaited by a task of
+    /// their own while another reads the control stream.
+    pub fn transfers(&self) -> TransferRx {
+        TransferRx {
+            conn: self.conn.clone(),
+        }
+    }
+
     /// A separate motion reader, so datagrams and the control stream can be read by
     /// different tasks (the control read must never be cancelled mid-frame).
     pub fn motion(&self) -> MotionRx {
@@ -757,6 +843,23 @@ impl LinkRx {
     /// Resolves when the connection is gone (closed, timed out, or lost).
     pub async fn closed(&self) -> String {
         self.conn.closed().await.to_string()
+    }
+}
+
+/// Transfer-stream acceptor of a trusted link.
+pub struct TransferRx {
+    /// A clone of the trusted connection; only its uni streams are accepted.
+    conn: Connection,
+}
+
+impl TransferRx {
+    /// Waits for the peer's next transfer stream; see [`Link::accept_transfer`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::Closed`] once the connection is gone.
+    pub async fn accept(&self) -> Result<([u8; 16], impl AsyncRead + Unpin + use<>), NetError> {
+        accept_transfer(&self.conn).await
     }
 }
 

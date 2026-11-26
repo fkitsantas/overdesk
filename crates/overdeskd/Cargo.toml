@@ -14,15 +14,16 @@ overdesk-proto.workspace = true
 thiserror.workspace = true
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "sync", "time", "io-std", "io-util"] }
 
-# Text only: the image features pull in extra crates and images are a Pro feature.
+# `image-data` is the clipboard image read/write that Pro uses; the open-core daemon never
+# shares images by itself. It pulls in the `image` crate with only the codecs the OS needs.
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
-arboard = { version = "3.7.0", default-features = false }
+arboard = { version = "3.7.0", default-features = false, features = ["image-data"] }
 
 # Linux: `wayland-data-control` lets the clipboard work in Wayland sessions (wlroots, KDE).
 [target.'cfg(target_os = "linux")'.dependencies.arboard]
 version = "3.7.0"
 default-features = false
-features = ["wayland-data-control"]
+features = ["image-data", "wayland-data-control"]
 
 [lints]
 workspace = true
