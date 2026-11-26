@@ -326,9 +326,13 @@ impl Engine {
             }
             Event::Escape => {
                 self.leave_driving(peer, &mut out);
-                let (_, x, y) = self.switcher.local();
+                // Mid-screen, not wherever the hidden cursor drifted: next to the edge a
+                // small push would cross straight back.
+                let r = self.switcher.layout().screens()[self.my_screen()].rect;
+                let (x, y) = ((r.w / 2) as i32, (r.h / 2) as i32);
                 self.switcher.set_local(self.my_screen(), x, y);
                 self.broadcast_focus(self.me, x, y, &mut out);
+                out.push(Action::InjectMove { x, y });
             }
             Event::PeerLost(lost) if lost == peer => {
                 self.sent_keys.release_all();
