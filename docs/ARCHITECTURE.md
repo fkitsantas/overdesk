@@ -140,6 +140,7 @@ managed corporate laptops.
 
 **Rules that all code follows now:**
 
+- **Device private key in OS storage:** the macOS Keychain or Windows DPAPI (per user). On Linux, for now, a 0600 file.
 - **Per-user only.** No Windows service, no `launchd` daemon, no root helper, no writes
   to `Program Files`, `/Library` or `HKLM`. Settings and keys live under the user's
   profile (already done: `~/Library/Application Support/Overdesk` on macOS,
