@@ -10,6 +10,7 @@ mod desk;
 mod preview;
 mod style;
 mod tray;
+mod update;
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::OnceLock;
@@ -133,6 +134,10 @@ struct App {
     focused: bool,
     /// The menu-bar / system-tray icon, once created (never in a preview).
     tray: Option<tray::Tray>,
+    /// A verified update waiting for a restart, if one was found.
+    update: Option<std::sync::Arc<update::Staged>>,
+    /// Whether an update check is in flight.
+    checking: bool,
 }
 
 /// Everything that can change the app: controller events, system events and user input.
@@ -153,6 +158,12 @@ enum Message {
     /// Create the tray icon. Queued from `boot` so it runs on the main thread inside the
     /// event loop, which macOS requires.
     CreateTray,
+    /// Look for an update (`true` when the user asked from the tray menu).
+    CheckUpdate(bool),
+    /// An update check finished; `Some` holds a verified, staged update.
+    UpdateChecked(Option<std::sync::Arc<update::Staged>>, bool),
+    /// The user chose to restart into the staged update.
+    InstallUpdate,
     /// The user picked an item from the tray menu.
     Tray(tray::Action),
     /// The user closed the window: hide it instead of quitting.
@@ -205,6 +216,8 @@ impl App {
                 show_address: false,
                 focused: false,
                 tray: None,
+                update: None,
+                checking: false,
             };
             return (app, preview::shoot());
         }
@@ -228,9 +241,15 @@ impl App {
             show_address: false,
             focused: false,
             tray: None,
+            update: None,
+            checking: false,
         };
         let theme = iced::system::theme().map(Message::Theme);
-        let theme = Task::batch([theme, Task::done(Message::CreateTray)]);
+        let theme = Task::batch([
+            theme,
+            Task::done(Message::CreateTray),
+            Task::done(Message::CheckUpdate(false)),
+        ]);
         (
             app,
             if starting {
@@ -322,6 +341,40 @@ impl App {
                     ])
                 });
             }
+            Message::Tray(tray::Action::CheckUpdates) => return Task::done(Message::CheckUpdate(true)),
+            Message::CheckUpdate(manual) => {
+                if self.checking || self.update.is_some() {
+                    return Task::none();
+                }
+                self.checking = true;
+                return Task::perform(update::check(), move |staged| Message::UpdateChecked(staged, manual));
+            }
+            Message::UpdateChecked(staged, manual) => {
+                self.checking = false;
+                if staged.is_some() {
+                    self.update = staged;
+                    // Only a check the user asked for brings the window forward.
+                    if manual {
+                        return Task::done(Message::Tray(tray::Action::Show));
+                    }
+                }
+            }
+            Message::InstallUpdate => {
+                let allowed =
+                    matches!(&self.screen, Screen::Running { state, .. } if update::install_allowed(&state.phase));
+                if let (true, Some(staged)) = (allowed, &self.update) {
+                    match staged.install() {
+                        Ok(()) => {
+                            self.send(Command::Disconnect);
+                            relaunch();
+                        }
+                        Err(e) => {
+                            eprintln!("overdesk: update not installed: {e}");
+                            self.update = None;
+                        }
+                    }
+                }
+            }
             Message::Tray(tray::Action::Disconnect) => self.send(Command::Disconnect),
             Message::Tray(tray::Action::Quit) => {
                 self.send(Command::Disconnect);
@@ -377,6 +430,7 @@ impl App {
             iced::window::close_requests().map(Message::CloseRequested),
             Subscription::run(tray::actions).map(Message::Tray),
             iced::system::theme_changes().map(Message::Theme),
+            iced::time::every(update::INTERVAL).map(|_| Message::CheckUpdate(false)),
             iced::window::events().filter_map(|(_, e)| match e {
                 iced::window::Event::Focused => Some(Message::Focus(true)),
                 iced::window::Event::Unfocused => Some(Message::Focus(false)),
@@ -688,7 +742,7 @@ impl App {
             );
         }
 
-        column![
+        let mut page = column![
             title("Pair a device".into()),
             subtitle(format!("Share this {here}'s keyboard and mouse with another computer.")),
             Space::new().height(10),
@@ -706,8 +760,24 @@ impl App {
             fallback,
         ]
         .spacing(6)
-        .align_x(Alignment::Center)
-        .into()
+        .align_x(Alignment::Center);
+        // A quiet line, only once an update has been downloaded and verified.
+        if let Some(staged) = &self.update {
+            page = page.push(Space::new().height(8)).push(
+                row![
+                    text(format!("Overdesk {} is ready. Restart to update.", staged.version()))
+                        .size(13)
+                        .style(muted),
+                    button(text("Restart").size(13))
+                        .padding([6, 12])
+                        .style(style::secondary)
+                        .on_press(Message::InstallUpdate),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+            );
+        }
+        page.into()
     }
 }
 

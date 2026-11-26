@@ -22,6 +22,8 @@ const ICON: &[u8] = include_bytes!("../../../assets/brand/tray-win-32.png");
 const SHOW: &str = "show";
 /// Menu item id of "Disconnect".
 const DISCONNECT: &str = "disconnect";
+/// Menu item id of "Check for updates".
+const UPDATES: &str = "updates";
 /// Menu item id of "Quit Overdesk".
 const QUIT: &str = "quit";
 
@@ -32,6 +34,8 @@ pub enum Action {
     Show,
     /// End the current session.
     Disconnect,
+    /// Look for an update now.
+    CheckUpdates,
     /// Disconnect if needed and exit.
     Quit,
 }
@@ -60,6 +64,7 @@ impl Tray {
             &MenuItem::with_id(SHOW, "Show Overdesk", true, None),
             &disconnect,
             &PredefinedMenuItem::separator(),
+            &MenuItem::with_id(UPDATES, "Check for updates", true, None),
             &MenuItem::with_id(QUIT, "Quit Overdesk", true, None),
         ])
         .map_err(|e| e.to_string())?;
@@ -135,6 +140,7 @@ pub fn actions() -> impl iced::futures::Stream<Item = Action> {
             let action = match event.id.as_ref() {
                 SHOW => Action::Show,
                 DISCONNECT => Action::Disconnect,
+                UPDATES => Action::CheckUpdates,
                 QUIT => Action::Quit,
                 _ => continue,
             };
