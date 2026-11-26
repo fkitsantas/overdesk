@@ -100,6 +100,18 @@ impl Layout {
     }
 }
 
+/// Whether `n` lies directly across `cur`'s edge in direction (`sx`, `sy`), sharing part of it.
+fn touches(cur: &Rect, n: &Rect, sx: i64, sy: i64) -> bool {
+    let overlap = |a0: i64, a1: i64, b0: i64, b1: i64| a0 < b1 && b0 < a1;
+    match (sx, sy) {
+        (1, 0) => n.x as i64 == cur.right() && overlap(cur.y as i64, cur.bottom(), n.y as i64, n.bottom()),
+        (-1, 0) => n.right() == cur.x as i64 && overlap(cur.y as i64, cur.bottom(), n.y as i64, n.bottom()),
+        (0, 1) => n.y as i64 == cur.bottom() && overlap(cur.x as i64, cur.right(), n.x as i64, n.right()),
+        (0, -1) => n.bottom() == cur.y as i64 && overlap(cur.x as i64, cur.right(), n.x as i64, n.right()),
+        _ => false,
+    }
+}
+
 /// Result of a relative cursor move. Coordinates are local to `screen` / `to`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Motion {
@@ -156,9 +168,31 @@ impl Switcher {
         if cur.contains(target) {
             return self.settle(target, |screen, x, y| Motion::Within { screen, x, y });
         }
-        // Probe the pixel just past the edge we hit; for corner exits also try each axis alone.
         let edge = cur.clamp(target);
         let (sx, sy) = ((target.0 - edge.0).signum(), (target.1 - edge.1).signum());
+        // Straight exit with exactly one screen along that edge: map the position along
+        // the edge proportionally, so screens of different sizes have no dead zones.
+        if (sx == 0) != (sy == 0) {
+            let mut along = self
+                .layout
+                .screens
+                .iter()
+                .enumerate()
+                .filter(|(i, s)| *i != from && touches(&cur, &s.rect, sx, sy));
+            if let (Some((to, n)), None) = (along.next(), along.next()) {
+                let n = n.rect;
+                let landing = if sx != 0 {
+                    let y = n.y as i64 + (edge.1 - cur.y as i64) * n.h as i64 / cur.h as i64;
+                    (target.0.clamp(n.x as i64, n.right() - 1), y)
+                } else {
+                    let x = n.x as i64 + (edge.0 - cur.x as i64) * n.w as i64 / cur.w as i64;
+                    (x, target.1.clamp(n.y as i64, n.bottom() - 1))
+                };
+                self.active = to;
+                return self.settle(landing, |to, x, y| Motion::Switched { from, to, x, y });
+            }
+        }
+        // Otherwise probe the pixel just past the edge; for corner exits try each axis alone.
         for (px, py) in [(sx, sy), (sx, 0), (0, sy)] {
             if (px, py) == (0, 0) {
                 continue;
