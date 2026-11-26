@@ -13,17 +13,14 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex};
 
 use overdesk_core::engine::Action;
 use overdesk_net::session::{Me, pair};
 use overdesk_net::store::Store;
 use overdesk_net::transport::{Link, Node};
-use overdesk_platform::input::Captured;
 use overdesk_proto::Os;
 use overdeskd::{Platform, Side, establish, run};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 const DEFAULT_PORT: u16 = 24801;
 
@@ -92,9 +89,6 @@ fn store_dir() -> PathBuf {
     }
 }
 
-/// Capture events go to whichever session is running now.
-type Slot = Arc<Mutex<Option<UnboundedSender<Captured>>>>;
-
 #[derive(Clone)]
 struct Headless;
 
@@ -104,87 +98,6 @@ impl Platform for Headless {
     }
     fn inject(&self, action: Action) {
         println!("[headless] {action:?}");
-    }
-}
-
-/// The OS adapter: macOS and Windows expose the same `Capture` / `Injector` API.
-#[cfg(any(target_os = "macos", windows))]
-mod native {
-    use std::sync::Arc;
-    use std::sync::mpsc::{Sender, channel};
-
-    use overdesk_core::engine::Action;
-    #[cfg(target_os = "macos")]
-    pub use overdesk_platform::mac::ffi::{Capture, Injector, main_display_size};
-    #[cfg(windows)]
-    pub use overdesk_platform::win::ffi::{Capture, Injector, main_display_size};
-
-    use super::Slot;
-
-    #[derive(Clone)]
-    pub struct NativePlatform {
-        capture: Arc<Capture>,
-        inject: Sender<Action>,
-    }
-
-    impl NativePlatform {
-        pub fn start(slot: Slot) -> Result<Self, String> {
-            let (capture, events) = Capture::start().map_err(|e| format!("capture: {e:?}"))?;
-            std::thread::Builder::new()
-                .name("overdesk-capture-bridge".into())
-                .spawn(move || {
-                    while let Ok(c) = events.recv() {
-                        if let Some(tx) = slot.lock().expect("slot lock").as_ref() {
-                            let _ = tx.send(c);
-                        }
-                    }
-                })
-                .map_err(|e| e.to_string())?;
-            let (inject, actions) = channel::<Action>();
-            let (ready_tx, ready) = channel::<Result<(), String>>();
-            // The injector (a Quartz event source on macOS) stays on one thread.
-            std::thread::Builder::new()
-                .name("overdesk-inject".into())
-                .spawn(move || {
-                    let mut injector = match Injector::new() {
-                        Ok(i) => {
-                            let _ = ready_tx.send(Ok(()));
-                            i
-                        }
-                        Err(e) => {
-                            let _ = ready_tx.send(Err(format!("inject: {e:?}")));
-                            return;
-                        }
-                    };
-                    while let Ok(a) = actions.recv() {
-                        match a {
-                            Action::InjectMove { x, y } => injector.pointer(x as f64, y as f64),
-                            Action::InjectButton { button, pressed } => injector.button(button, pressed),
-                            Action::InjectKey { code, pressed } => {
-                                injector.key(code, pressed);
-                            }
-                            Action::InjectScroll { dx, dy, unit, phase } => injector.scroll(dx, dy, unit, phase),
-                            Action::ReleaseAll => injector.release_all(),
-                            _ => {}
-                        }
-                    }
-                })
-                .map_err(|e| e.to_string())?;
-            ready.recv().map_err(|e| e.to_string())??;
-            Ok(Self {
-                capture: Arc::new(capture),
-                inject,
-            })
-        }
-    }
-
-    impl super::Platform for NativePlatform {
-        fn swallow(&self, on: bool) {
-            self.capture.set_swallow(on);
-        }
-        fn inject(&self, action: Action) {
-            let _ = self.inject.send(action);
-        }
     }
 }
 
@@ -200,7 +113,7 @@ async fn ask(code: u32) -> bool {
 }
 
 /// Pins or pairs, then runs one session to its end.
-async fn session(mut link: Link, store: &Store, args: &Args, me: &Me, platform: impl Platform, slot: &Slot) {
+async fn session(mut link: Link, store: &Store, args: &Args, me: &Me, platform: impl Platform) {
     let peer = link.peer_fingerprint();
     let pinned = store.pins().unwrap_or_default();
     if !pinned.contains(&peer) {
@@ -230,17 +143,15 @@ async fn session(mut link: Link, store: &Store, args: &Args, me: &Me, platform: 
                 "Connected to {}. Escape hatch: Ctrl+Option+Cmd+Esc (Ctrl+Alt+Win+Esc on Windows).",
                 s.peer_name
             );
-            let (tx, rx) = unbounded_channel();
-            *slot.lock().expect("slot lock") = Some(tx);
-            run(s, rx, platform, |_| {}).await;
-            *slot.lock().expect("slot lock") = None;
+            let local = platform.capture();
+            run(s, local, platform, |_| {}).await;
             println!("Disconnected.");
         }
         Err(e) => println!("Session failed: {e}"),
     }
 }
 
-async fn serve(args: Args, platform: impl Platform + Clone, slot: Slot, me: Me) -> Result<(), String> {
+async fn serve(args: Args, platform: impl Platform + Clone, me: Me) -> Result<(), String> {
     let store = Store::open(store_dir()).map_err(|e| e.to_string())?;
     let id = store.identity().map_err(|e| e.to_string())?;
     let bind = args.listen.unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
@@ -254,13 +165,13 @@ async fn serve(args: Args, platform: impl Platform + Clone, slot: Slot, me: Me) 
     );
     if let Some(addr) = args.connect {
         let link = node.connect(addr).await.map_err(|e| e.to_string())?;
-        session(link, &store, &args, &me, platform, &slot).await;
+        session(link, &store, &args, &me, platform).await;
         return Ok(());
     }
     // shortcut: one session at a time (Free tier: 2 devices); others wait for the next accept.
     while let Some(setup) = node.accept().await {
         match setup.await {
-            Ok(link) => session(link, &store, &args, &me, platform.clone(), &slot).await,
+            Ok(link) => session(link, &store, &args, &me, platform.clone()).await,
             Err(e) => println!("Incoming connection failed: {e}"),
         }
     }
@@ -283,7 +194,6 @@ async fn main() -> ExitCode {
             std::process::exit(0);
         });
     }
-    let slot: Slot = Arc::default();
     let result = if args.headless {
         let me = Me {
             name: args.name.clone(),
@@ -291,9 +201,9 @@ async fn main() -> ExitCode {
             width: 1920,
             height: 1080,
         };
-        serve(args, Headless, slot, me).await
+        serve(args, Headless, me).await
     } else {
-        start_native(args, slot).await
+        start_native(args).await
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -305,8 +215,8 @@ async fn main() -> ExitCode {
 }
 
 #[cfg(any(target_os = "macos", windows))]
-async fn start_native(args: Args, slot: Slot) -> Result<(), String> {
-    let (width, height) = native::main_display_size();
+async fn start_native(args: Args) -> Result<(), String> {
+    let (width, height) = overdeskd::native::main_display_size();
     let os = if cfg!(windows) { Os::Windows } else { Os::MacOs };
     let me = Me {
         name: args.name.clone(),
@@ -314,11 +224,11 @@ async fn start_native(args: Args, slot: Slot) -> Result<(), String> {
         width,
         height,
     };
-    let platform = native::NativePlatform::start(slot.clone())?;
-    serve(args, platform, slot, me).await
+    let platform = overdeskd::native::NativePlatform::start()?;
+    serve(args, platform, me).await
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
-async fn start_native(_args: Args, _slot: Slot) -> Result<(), String> {
+async fn start_native(_args: Args) -> Result<(), String> {
     Err("no input adapter for this OS yet; use --headless".into())
 }

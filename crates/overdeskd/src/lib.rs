@@ -3,6 +3,8 @@
 //! Platform-free; `main.rs` supplies the OS adapter.
 
 pub mod controller;
+#[cfg(any(target_os = "macos", windows))]
+pub mod native;
 
 use std::collections::BTreeMap;
 use std::time::Instant;
