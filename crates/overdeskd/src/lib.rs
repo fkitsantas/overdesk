@@ -177,9 +177,17 @@ pub async fn run(session: Session, mut local: UnboundedReceiver<Captured>, platf
         }),
     ]);
     let epoch = Instant::now();
+    let debug = std::env::var_os("OVERDESK_DEBUG").is_some();
     while let Some(event) = queue.recv().await {
         let lost = event == Event::PeerLost(peer);
-        for action in engine.handle(event, epoch.elapsed().as_millis() as u64) {
+        if debug {
+            eprintln!("[debug] {:?} <- {event:?}", engine.mode());
+        }
+        let actions = engine.handle(event, epoch.elapsed().as_millis() as u64);
+        if debug && !actions.is_empty() {
+            eprintln!("[debug]   -> {actions:?}");
+        }
+        for action in actions {
             match action {
                 // shortcut: one peer per session (Free tier: 2 devices); route by `to` for Pro.
                 Action::Send { msg, .. } => {
