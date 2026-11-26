@@ -69,7 +69,9 @@ pub fn startup() {
 }
 
 /// Waits a few seconds, then declares this start healthy: the update is kept and its backup
-/// deleted. Called once the controller is up; a crash before this point counts as a failed start.
+/// deleted. Started with the app, so the window being up counts whichever screen it shows
+/// (the permissions screen never starts the controller); a crash before this point counts
+/// as a failed start.
 pub async fn confirm_healthy() {
     tokio::time::sleep(rollback::HEALTHY_AFTER).await;
     rollback::confirm();

@@ -262,10 +262,13 @@ impl App {
             login_error: None,
         };
         let theme = iced::system::theme().map(Message::Theme);
+        // The window being up for a while counts as healthy, whichever screen it shows
+        // (the permissions screen never starts the controller).
         let theme = Task::batch([
             theme,
             Task::done(Message::CreateTray),
             Task::done(Message::CheckUpdate(false)),
+            Task::perform(update::confirm_healthy(), |()| Message::Healthy),
         ]);
         (
             app,
@@ -298,10 +301,7 @@ impl App {
     /// Applies a message to the app's state.
     fn apply(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Started(Ok((commands, state))) => {
-                self.screen = Screen::Running { commands, state };
-                return Task::perform(update::confirm_healthy(), |()| Message::Healthy);
-            }
+            Message::Started(Ok((commands, state))) => self.screen = Screen::Running { commands, state },
             Message::Healthy => {}
             Message::Started(Err(e)) => self.screen = Screen::Failed(e),
             Message::State(new) => {
@@ -560,7 +560,7 @@ impl App {
 
     /// The screen for each controller phase.
     fn running_view<'a>(&'a self, state: &'a AppState) -> Element<'a, Message> {
-        let here = device_word(state.os);
+        let me = &state.name;
         match &state.phase {
             Phase::Idle => self.idle_view(state),
             Phase::Connecting { address } => column![
@@ -605,13 +605,13 @@ impl App {
             .into(),
             Phase::Connected { peer, peer_os, mode } => {
                 let status = match mode {
-                    Mode::Local => format!("Cursor is on this {here}"),
+                    Mode::Local => format!("Cursor is on {me}"),
                     Mode::Driving(_) => format!("Cursor is on {peer}"),
-                    Mode::Driven(_) => format!("{peer} is using this {here}"),
+                    Mode::Driven(_) => format!("{peer} is using {me}"),
                 };
                 let hint = match mode {
                     Mode::Driving(_) => format!("Press {} to take back control at any time.", escape_chord(state.os)),
-                    Mode::Driven(_) => format!("{peer} is controlling this {here}."),
+                    Mode::Driven(_) => format!("{peer} is controlling {me}."),
                     _ => format!("Move the cursor across the screen edge to use {peer}."),
                 };
                 column![
@@ -654,7 +654,7 @@ impl App {
             }
             Phase::Lost { peer } => column![
                 title(format!("Lost connection to {peer}")),
-                subtitle(format!("Your keyboard and mouse are back on this {here}.")),
+                subtitle(format!("Your keyboard and mouse are back on {me}.")),
                 Space::new().height(18),
                 button(text("Done"))
                     .padding([10, 22])
@@ -682,7 +682,7 @@ impl App {
     /// "Pair a device": which side the other computer is on, the computers found on the
     /// network, and a collapsed fallback for typing an address.
     fn idle_view<'a>(&'a self, state: &'a AppState) -> Element<'a, Message> {
-        let here = device_word(state.os);
+        let me = &state.name;
         let side = |s: Side, label: &'static str| {
             button(text(label))
                 .padding([8, 20])
@@ -781,9 +781,9 @@ impl App {
 
         let mut page = column![
             title("Pair a device".into()),
-            subtitle(format!("Share this {here}'s keyboard and mouse with another computer.")),
+            subtitle(format!("Share {me}'s keyboard and mouse with another computer.")),
             Space::new().height(10),
-            text(format!("Where is it, next to this {here}?")).size(13).style(muted),
+            text(format!("Where is it, next to {me}?")).size(13).style(muted),
             row![side(Side::Left, "On the left"), side(Side::Right, "On the right")].spacing(8),
             Space::new().height(6),
             // Two rows fit without scrolling; more scroll inside a fixed band so the
@@ -984,23 +984,22 @@ fn parse_address(s: &str) -> Option<SocketAddr> {
 
 /// The operating system this build runs on.
 fn this_os() -> Os {
-    if cfg!(windows) { Os::Windows } else { Os::MacOs }
-}
-
-/// What people call this device in sentences: "Mac" or "PC".
-fn device_word(os: Os) -> &'static str {
-    match os {
-        Os::MacOs => "Mac",
-        _ => "PC",
+    if cfg!(windows) {
+        Os::Windows
+    } else if cfg!(target_os = "linux") {
+        Os::Linux
+    } else {
+        Os::MacOs
     }
 }
 
-/// A peer's operating system, named for people.
+/// An operating system, named for people. A secondary detail: devices are named by their
+/// own computer name, never by a guessed role.
 fn os_word(os: Os) -> &'static str {
     match os {
-        Os::MacOs => "Mac",
-        Os::Windows => "Windows PC",
-        Os::Linux => "Linux PC",
+        Os::MacOs => "macOS",
+        Os::Windows => "Windows",
+        Os::Linux => "Linux",
         Os::Android => "Android TV",
     }
 }
@@ -1033,7 +1032,8 @@ fn store_dir() -> std::path::PathBuf {
     }
 }
 
-/// This device's name as people know it: the macOS computer name, or the Windows one.
+/// This device's name as people know it: the macOS computer name, the Windows one, or the
+/// Linux hostname.
 fn device_name() -> String {
     #[cfg(target_os = "macos")]
     if let Ok(out) = std::process::Command::new("scutil")
@@ -1045,6 +1045,15 @@ fn device_name() -> String {
         if !name.is_empty() {
             return name;
         }
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(name) = std::env::var("HOSTNAME")
+        .ok()
+        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+    {
+        return name;
     }
     std::env::var("COMPUTERNAME").unwrap_or_else(|_| "This computer".into())
 }

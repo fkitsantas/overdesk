@@ -25,7 +25,7 @@ pub fn state(which: &str) -> (AppState, Option<(bool, bool)>) {
             me: true,
         },
         ScreenView {
-            name: "Work PC".into(),
+            name: "DESKTOP-7Q2K4LM".into(),
             x: 3840,
             y: 0,
             w: 1920,
@@ -35,7 +35,7 @@ pub fn state(which: &str) -> (AppState, Option<(bool, bool)>) {
     ];
     let peer = PeerId([2; 16]);
     let connected = |mode| Phase::Connected {
-        peer: "Work PC".into(),
+        peer: "DESKTOP-7Q2K4LM".into(),
         peer_os: Os::Windows,
         mode,
     };
@@ -46,7 +46,7 @@ pub fn state(which: &str) -> (AppState, Option<(bool, bool)>) {
         "local" => (connected(Mode::Local), desk, None),
         "driving" => (connected(Mode::Driving(peer)), desk, None),
         "driven" => (connected(Mode::Driven(peer)), desk, None),
-        "lost" => (Phase::Lost { peer: "Work PC".into() }, vec![], None),
+        "lost" => (Phase::Lost { peer: "DESKTOP-7Q2K4LM".into() }, vec![], None),
         "error" => (Phase::Error("Couldn't connect: timed out. Check that Overdesk is open on the other computer and that both are on the same network.".into()), vec![], None),
         _ => (Phase::Idle, vec![], None),
     };
@@ -61,14 +61,14 @@ pub fn state(which: &str) -> (AppState, Option<(bool, bool)>) {
             vec![
                 NearbyDevice {
                     id: PeerId([3; 16]),
-                    name: "Studio Mac".into(),
+                    name: "Mac Studio".into(),
                     os: Os::MacOs,
                     address: "192.168.1.20:24801".parse().unwrap(),
                     paired: true,
                 },
                 NearbyDevice {
                     id: PeerId([4; 16]),
-                    name: "Work PC".into(),
+                    name: "DESKTOP-7Q2K4LM".into(),
                     os: Os::Windows,
                     address: "192.168.1.50:24801".parse().unwrap(),
                     paired: false,

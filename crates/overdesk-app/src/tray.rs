@@ -5,7 +5,6 @@
 
 use iced::futures::SinkExt;
 use overdesk_core::engine::Mode;
-use overdesk_proto::Os;
 use overdeskd::controller::{AppState, Phase};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
@@ -114,7 +113,7 @@ impl Tray {
 }
 
 /// The status line for a state: "Not connected", "Connected to {peer}", "Using {peer}"
-/// while driving, or "{peer} is using this Mac/PC" while driven.
+/// while driving, or "{peer} is using {this computer}" while driven.
 fn status_text(state: &AppState) -> String {
     let Phase::Connected { peer, mode, .. } = &state.phase else {
         return "Not connected".into();
@@ -123,8 +122,7 @@ fn status_text(state: &AppState) -> String {
         Mode::Local => format!("Connected to {peer}"),
         Mode::Driving(_) => format!("Using {peer}"),
         Mode::Driven(_) => {
-            let device = if state.os == Os::MacOs { "Mac" } else { "PC" };
-            format!("{peer} is using this {device}")
+            format!("{peer} is using {}", state.name)
         }
     }
 }
