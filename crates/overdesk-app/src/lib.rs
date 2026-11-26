@@ -1171,8 +1171,9 @@ fn escape_chord(os: Os) -> &'static str {
     }
 }
 
-/// Where the identity and pinned peers live: `OVERDESK_HOME`, or the per-OS default.
-fn store_dir() -> std::path::PathBuf {
+/// Where the identity, pinned peers and (in the official build) the licence live:
+/// `OVERDESK_HOME`, or the per-OS default. Public so every build uses the same folder.
+pub fn store_dir() -> std::path::PathBuf {
     if let Some(dir) = std::env::var_os("OVERDESK_HOME") {
         return dir.into();
     }
