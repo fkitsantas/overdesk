@@ -55,6 +55,8 @@ async fn pair_connect_and_lose_a_peer() {
     let (a_cmd, mut a) = spawn(config("mac", Os::MacOs, 1440, 900), Fake).await.unwrap();
     let (b_cmd, mut b) = spawn(config("pc", Os::Windows, 1920, 1080), Fake).await.unwrap();
     let b_addr = b.borrow().address.expect("B is listening");
+    b_cmd.send(Command::AllowPairing(true)).unwrap();
+    wait(&mut b, "B pairing armed", |_| true).await;
 
     a_cmd
         .send(Command::Connect {
@@ -99,6 +101,7 @@ async fn declined_pairing_returns_to_idle_with_a_reason() {
     let (a_cmd, mut a) = spawn(config("mac2", Os::MacOs, 1440, 900), Fake).await.unwrap();
     let (b_cmd, mut b) = spawn(config("pc2", Os::Windows, 1920, 1080), Fake).await.unwrap();
     let b_addr = b.borrow().address.unwrap();
+    b_cmd.send(Command::AllowPairing(true)).unwrap();
     a_cmd
         .send(Command::Connect {
             address: b_addr,
@@ -111,4 +114,20 @@ async fn declined_pairing_returns_to_idle_with_a_reason() {
     b_cmd.send(Command::AnswerCode(false)).unwrap();
     wait(&mut a, "A error", |p| matches!(p, Phase::Error(_))).await;
     wait(&mut b, "B back to idle", |p| matches!(p, Phase::Idle | Phase::Error(_))).await;
+}
+
+#[tokio::test]
+async fn unknown_device_cannot_prompt_unless_pairing_is_open() {
+    let (a_cmd, mut a) = spawn(config("mac3", Os::MacOs, 1440, 900), Fake).await.unwrap();
+    let (_b_cmd, b) = spawn(config("pc3", Os::Windows, 1920, 1080), Fake).await.unwrap();
+    let b_addr = b.borrow().address.unwrap();
+    assert!(!b.borrow().pairing_open, "closed by default");
+    a_cmd
+        .send(Command::Connect {
+            address: b_addr,
+            side: Side::Right,
+        })
+        .unwrap();
+    wait(&mut a, "A refused", |p| matches!(p, Phase::Error(_))).await;
+    assert_eq!(b.borrow().phase, Phase::Idle, "B never showed a code");
 }
