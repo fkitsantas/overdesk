@@ -81,9 +81,29 @@ costs nothing until it's used.
 
 ## 7. Pairing
 
-- Each device has a long-lived key pair; its `PeerId` derives from the public key.
-- To pair, both screens show the same 6-digit code, and the user confirms on both.
-- Paired keys are pinned, so later connections are mutually authenticated with no prompt.
+Each device has a long-lived key pair inside a self-signed certificate. Its `PeerId` is
+the first 16 bytes of the SHA-256 fingerprint of that certificate.
+
+1. The devices connect over mutual TLS 1.3. Certificate *chains* are not checked, but the
+   handshake signature always is, so a device must hold the private key of the
+   certificate it presents.
+2. On a connection between peers that aren't yet trusted, only the `Pairing` message
+   type exists. `Control` messages never decode there, so an unpaired device cannot send
+   input.
+3. **Commit, then reveal:**
+   - The dialer sends `Commit = SHA-256(dialer fingerprint ‖ dialer nonce)`.
+   - The listener replies with its own fresh nonce.
+   - The dialer reveals its nonce, and the listener checks it against the commitment.
+4. Both screens show `SHA-256(both fingerprints ‖ both nonces) mod 10⁶` as a 6-digit code.
+
+Because the dialer commits before it sees the listener's nonce, an attacker in the middle
+can't keep trying keys until the codes match. It gets one chance in a million per
+attempt, and every failed attempt is visible to the user.
+
+5. Each user confirms that the codes match. The peer is pinned only after **both** sides
+   confirm. Later connections are authenticated by the pinned fingerprint, with no prompt.
+
+Trust is strictly pairwise: replicated Desk state can never add a trusted key.
 
 ## Status
 
@@ -94,5 +114,6 @@ costs nothing until it's used.
 | `Switcher`, held keys, ⌘↔Ctrl remap | ✅ |
 | Replicated Desk state | 🔜 |
 | Lazy clipboard (the wire has plain text for now) | 🔜 |
-| QUIC lanes and pairing | 🔜 |
+| Pairing exchange (commit-reveal, 6-digit code) | ✅ |
+| QUIC lanes | 🔜 |
 | Platform adapters | 🔜 |

@@ -13,23 +13,38 @@ pub type Fingerprint = [u8; 32];
 pub type Nonce = [u8; 32];
 
 /// SHA-256 of a certificate's DER bytes.
-pub fn fingerprint(_cert_der: &[u8]) -> Fingerprint {
-    todo!()
+pub fn fingerprint(cert_der: &[u8]) -> Fingerprint {
+    sha256(&[cert_der])
+}
+
+fn sha256(parts: &[&[u8]]) -> [u8; 32] {
+    let bytes = parts.concat();
+    digest(&SHA256, &bytes)
+        .as_ref()
+        .try_into()
+        .expect("SHA-256 is 32 bytes")
+}
+
+/// Domain-separated so a commitment can never be reused as a code input.
+fn commitment(nonce: &Nonce, dialer_fp: &Fingerprint) -> [u8; 32] {
+    sha256(&[b"overdesk-pair-commit-v1", dialer_fp, nonce])
 }
 
 /// A device's stable id: the first 16 bytes of its certificate fingerprint.
-pub fn peer_id(_fp: &Fingerprint) -> PeerId {
-    todo!()
+pub fn peer_id(fp: &Fingerprint) -> PeerId {
+    PeerId(fp[..16].try_into().expect("16 of 32 bytes"))
 }
 
 /// The code both users compare, `0..1_000_000`; display with `{:06}`.
-pub fn code(
-    _dialer_nonce: &Nonce,
-    _listener_nonce: &Nonce,
-    _dialer_fp: &Fingerprint,
-    _listener_fp: &Fingerprint,
-) -> u32 {
-    todo!()
+pub fn code(dialer_nonce: &Nonce, listener_nonce: &Nonce, dialer_fp: &Fingerprint, listener_fp: &Fingerprint) -> u32 {
+    let h = sha256(&[
+        b"overdesk-pair-code-v1",
+        dialer_fp,
+        listener_fp,
+        dialer_nonce,
+        listener_nonce,
+    ]);
+    u32::from_be_bytes([h[0], h[1], h[2], h[3]]) % 1_000_000
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -59,12 +74,30 @@ pub struct Dialer {
 
 impl Dialer {
     /// `nonce` must be fresh random bytes for every attempt.
-    pub fn new(_nonce: Nonce, _dialer_fp: Fingerprint, _listener_fp: Fingerprint) -> (Self, Pairing) {
-        todo!()
+    pub fn new(nonce: Nonce, dialer_fp: Fingerprint, listener_fp: Fingerprint) -> (Self, Pairing) {
+        let commit = Pairing::Commit {
+            digest: commitment(&nonce, &dialer_fp),
+        };
+        (
+            Self {
+                nonce,
+                dialer_fp,
+                listener_fp,
+                done: false,
+            },
+            commit,
+        )
     }
 
-    pub fn on_message(&mut self, _msg: &Pairing) -> Result<Step, PairError> {
-        todo!()
+    pub fn on_message(&mut self, msg: &Pairing) -> Result<Step, PairError> {
+        match msg {
+            Pairing::Nonce { nonce: theirs } if !self.done => {
+                self.done = true;
+                let shown = code(&self.nonce, theirs, &self.dialer_fp, &self.listener_fp);
+                Ok(Step::SendAndShow(Pairing::Reveal { nonce: self.nonce }, shown))
+            }
+            _ => Err(PairError::Unexpected),
+        }
     }
 }
 
@@ -79,12 +112,37 @@ pub struct Listener {
 
 impl Listener {
     /// `nonce` must be fresh random bytes for every attempt.
-    pub fn new(_nonce: Nonce, _dialer_fp: Fingerprint, _listener_fp: Fingerprint) -> Self {
-        todo!()
+    pub fn new(nonce: Nonce, dialer_fp: Fingerprint, listener_fp: Fingerprint) -> Self {
+        Self {
+            nonce,
+            dialer_fp,
+            listener_fp,
+            commit: None,
+            done: false,
+        }
     }
 
-    pub fn on_message(&mut self, _msg: &Pairing) -> Result<Step, PairError> {
-        todo!()
+    pub fn on_message(&mut self, msg: &Pairing) -> Result<Step, PairError> {
+        match (msg, self.commit) {
+            (Pairing::Commit { digest }, None) => {
+                self.commit = Some(*digest);
+                Ok(Step::Send(Pairing::Nonce { nonce: self.nonce }))
+            }
+            (Pairing::Reveal { nonce: theirs }, Some(committed)) if !self.done => {
+                self.done = true;
+                // Not constant-time: the commitment is public, so timing leaks nothing secret.
+                if commitment(theirs, &self.dialer_fp) != committed {
+                    return Err(PairError::BadReveal);
+                }
+                Ok(Step::Show(code(
+                    theirs,
+                    &self.nonce,
+                    &self.dialer_fp,
+                    &self.listener_fp,
+                )))
+            }
+            _ => Err(PairError::Unexpected),
+        }
     }
 }
 

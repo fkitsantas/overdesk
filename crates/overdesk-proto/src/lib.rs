@@ -220,8 +220,8 @@ pub struct SeqGate {
 
 impl SeqGate {
     /// Starts a new focus period: only `seq` and later are accepted from now on.
-    pub fn start_at(&mut self, _seq: u32) {
-        todo!()
+    pub fn start_at(&mut self, seq: u32) {
+        self.last = Some(seq.wrapping_sub(1));
     }
 
     pub fn accept(&mut self, seq: u32) -> bool {
