@@ -2,6 +2,8 @@
 //! The Overdesk daemon: wires capture, the network and injection to the Desk engine.
 //! Platform-free; `main.rs` supplies the OS adapter.
 
+pub mod controller;
+
 use std::collections::BTreeMap;
 use std::time::Instant;
 
