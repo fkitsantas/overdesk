@@ -63,14 +63,24 @@ pub struct AppState {
     pub address: Option<SocketAddr>,
     pub phase: Phase,
     pub desk: Vec<ScreenView>,
+    /// Whether unknown devices may currently start pairing with this one.
+    pub pairing_open: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    Connect { address: SocketAddr, side: Side },
+    Connect {
+        address: SocketAddr,
+        side: Side,
+    },
     AnswerCode(bool),
     Disconnect,
+    /// Opens (for [`PAIRING_WINDOW`]) or closes pairing for devices that dial in.
+    AllowPairing(bool),
 }
+
+/// How long "Pair a device" stays open for incoming devices.
+pub const PAIRING_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
 
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
@@ -85,12 +95,26 @@ struct Shared<P> {
     state: watch::Sender<AppState>,
     /// Where the user's answer to the current pairing code goes.
     answer: Mutex<Option<oneshot::Sender<bool>>>,
+    /// Until when unknown devices dialing in may pair. Closed by default.
+    pairing_until: Mutex<Option<tokio::time::Instant>>,
     store: Store,
     me: Me,
     platform: P,
 }
 
 impl<P> Shared<P> {
+    fn pairing_allowed(&self) -> bool {
+        self.pairing_until
+            .lock()
+            .expect("pairing lock")
+            .is_some_and(|t| tokio::time::Instant::now() < t)
+    }
+
+    fn set_pairing(&self, until: Option<tokio::time::Instant>) {
+        *self.pairing_until.lock().expect("pairing lock") = until;
+        self.state.send_modify(|s| s.pairing_open = until.is_some());
+    }
+
     fn set(&self, phase: Phase, desk: Option<Vec<ScreenView>>) {
         self.state.send_modify(|s| {
             s.phase = phase;
@@ -115,10 +139,12 @@ pub async fn spawn<P: Platform + Clone + Sync>(
         address: node.local_addr().ok(),
         phase: Phase::Idle,
         desk: Vec::new(),
+        pairing_open: false,
     });
     let shared = Arc::new(Shared {
         state,
         answer: Mutex::new(None),
+        pairing_until: Mutex::new(None),
         store,
         me: config.me,
         platform,
@@ -146,13 +172,27 @@ async fn control<P: Platform + Clone + Sync>(
                     let (node, shared) = (node.clone(), shared.clone());
                     active = Some(tokio::spawn(async move {
                         let link = node.connect(address).await;
-                        session(shared, link, side).await;
+                        session(shared, link, side, false).await;
                     }));
                 }
                 Some(Command::Connect { .. }) => {}
                 Some(Command::AnswerCode(matches)) => {
                     if let Some(tx) = shared.answer.lock().expect("answer lock").take() {
                         let _ = tx.send(matches);
+                    }
+                }
+                Some(Command::AllowPairing(open)) => {
+                    let until = open.then(|| tokio::time::Instant::now() + PAIRING_WINDOW);
+                    shared.set_pairing(until);
+                    if let Some(deadline) = until {
+                        let shared = shared.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep_until(deadline).await;
+                            // Close only if nobody re-armed it meanwhile.
+                            if *shared.pairing_until.lock().expect("pairing lock") == Some(deadline) {
+                                shared.set_pairing(None);
+                            }
+                        });
                     }
                 }
                 Some(Command::Disconnect) => {
@@ -173,7 +213,7 @@ async fn control<P: Platform + Clone + Sync>(
                 active = Some(tokio::spawn(async move {
                     let link = setup.await;
                     // The listener's side is decided by the dialer's Desk.
-                    session(shared, link, Side::Right).await;
+                    session(shared, link, Side::Right, true).await;
                 }));
             }
         }
@@ -181,13 +221,24 @@ async fn control<P: Platform + Clone + Sync>(
 }
 
 /// Pairs if needed, establishes the Desk, runs until the peer is lost.
-async fn session<P: Platform + Clone + Sync>(shared: Arc<Shared<P>>, link: Result<Link, NetError>, side: Side) {
+/// `inbound` connections from unknown devices pair only while pairing is open.
+async fn session<P: Platform + Clone + Sync>(
+    shared: Arc<Shared<P>>,
+    link: Result<Link, NetError>,
+    side: Side,
+    inbound: bool,
+) {
     let mut link = match link {
         Ok(l) => l,
         Err(e) => return shared.set(Phase::Error(format!("Couldn't connect: {e}")), None),
     };
     let peer_fp = link.peer_fingerprint();
     if !shared.store.pins().unwrap_or_default().contains(&peer_fp) {
+        if inbound && !shared.pairing_allowed() {
+            // Deny by default: no prompt, no state change, nothing for a stranger to probe.
+            link.close("not paired");
+            return;
+        }
         let who = link.remote_address().ip().to_string();
         let confirm = async |code: u32| {
             let (tx, rx) = oneshot::channel();
@@ -203,6 +254,7 @@ async fn session<P: Platform + Clone + Sync>(shared: Arc<Shared<P>>, link: Resul
         };
         match pair(&mut link, confirm).await {
             Ok(fp) => {
+                shared.set_pairing(None);
                 if let Err(e) = shared.store.pin(fp) {
                     return shared.set(Phase::Error(format!("Couldn't save the pairing: {e}")), None);
                 }
