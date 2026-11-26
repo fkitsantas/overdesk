@@ -3,6 +3,7 @@
 //!
 //!   cargo run -p overdesk-platform --example mac_probe -- listen   # print captured input for 10 s
 //!   cargo run -p overdesk-platform --example mac_probe -- inject   # draw a small square, scroll, tap Shift
+//!   cargo run -p overdesk-platform --example mac_probe -- jump     # inject a jump, then print your next real moves
 
 #[cfg(target_os = "macos")]
 fn main() {
@@ -69,7 +70,26 @@ fn main() {
             inj.key(0xE1, false);
             println!("Injected square, pixel scroll with momentum, Shift tap.");
         }
-        _ => println!("usage: mac_probe listen|inject"),
+        Some("jump") => {
+            // Does the first real delta after an injected jump carry the jump itself?
+            let (_capture, rx) = Capture::start().expect("tap");
+            let mut inj = Injector::new().expect("injector");
+            inj.pointer(300.0, 300.0);
+            inj.pointer(1300.0, 800.0);
+            println!("Injected jump (300,300) -> (1300,800). Nudge the mouse slightly within 8 s...");
+            let end = Instant::now() + Duration::from_secs(8);
+            let mut seen = 0;
+            while let Some(left) = end.checked_duration_since(Instant::now()) {
+                if let Ok(ev) = rx.recv_timeout(left) {
+                    println!("{ev:?}");
+                    seen += 1;
+                    if seen == 5 {
+                        break;
+                    }
+                }
+            }
+        }
+        _ => println!("usage: mac_probe listen|inject|jump"),
     }
 }
 
