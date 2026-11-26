@@ -26,6 +26,8 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// First byte on the control stream. QUIC only announces a stream to the peer once data
 /// is written, so the dialer sends this immediately; it doubles as a stream-format version.
 const STREAM_PREAMBLE: u8 = 1;
+/// A peer that connects but never opens its control stream is dropped after this.
+pub const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum NetError {
@@ -228,11 +230,15 @@ impl Node {
         Link::new(conn, send, recv, self.local)
     }
 
-    /// Waits for the next peer and its control stream. `None` once the endpoint is closed.
-    pub async fn accept(&self) -> Option<Result<Link, NetError>> {
+    /// Waits for the next incoming connection and returns its setup as a separate
+    /// future, so a stalled peer cannot hold up others: spawn one per connection.
+    /// Setup (handshake, control stream, preamble) is bounded by [`SETUP_TIMEOUT`].
+    /// `None` once the endpoint is closed.
+    pub async fn accept(&self) -> Option<impl Future<Output = Result<Link, NetError>> + use<>> {
         let incoming = self.endpoint.accept().await?;
-        Some(
-            async {
+        let local = self.local;
+        Some(async move {
+            let setup = async {
                 let conn = incoming.await.map_err(closed)?;
                 let (send, mut recv) = conn.accept_bi().await.map_err(closed)?;
                 let mut preamble = [0u8];
@@ -241,10 +247,13 @@ impl Node {
                     conn.close(1u32.into(), b"unknown stream format");
                     return Err(closed("unknown stream format"));
                 }
-                Link::new(conn, send, recv, self.local)
-            }
-            .await,
-        )
+                Link::new(conn, send, recv, local)
+            };
+            // Dropping the timed-out setup drops the connection, which closes it.
+            tokio::time::timeout(SETUP_TIMEOUT, setup)
+                .await
+                .map_err(|_| closed("setup timed out"))?
+        })
     }
 }
 
@@ -323,5 +332,57 @@ impl Link {
     /// Resolves when the connection is gone (closed, timed out, or lost).
     pub async fn closed(&self) -> String {
         self.conn.closed().await.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node() -> (Identity, Node) {
+        let id = Identity::generate().unwrap();
+        let node = Node::bind(&id, "127.0.0.1:0".parse().unwrap()).unwrap();
+        (id, node)
+    }
+
+    /// Accepts the next connection and runs its setup in the background, as a real caller does.
+    async fn spawn_next_setup(server: &Node) -> tokio::task::JoinHandle<Result<Link, NetError>> {
+        tokio::spawn(server.accept().await.unwrap())
+    }
+
+    /// Completes TLS but never opens the control stream.
+    async fn stalled_peer(addr: SocketAddr) -> (Node, Connection) {
+        let (_, n) = node();
+        let conn = n.endpoint.connect(addr, SERVER_NAME).unwrap().await.unwrap();
+        (n, conn)
+    }
+
+    #[tokio::test]
+    async fn stalled_peer_does_not_block_accepting_others() {
+        let (_, server) = node();
+        let addr = server.local_addr().unwrap();
+        // Spawned like a real caller would: the handshake runs, the stream never comes.
+        let (stalled_setup, (_slow_node, _slow_conn)) = tokio::join!(spawn_next_setup(&server), stalled_peer(addr));
+        let (fast_id, fast) = node();
+        let (dialed, link) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(fast.connect(addr), async { server.accept().await.unwrap().await })
+        })
+        .await
+        .expect("second peer was blocked behind the stalled one");
+        dialed.unwrap();
+        assert_eq!(link.unwrap().peer_fingerprint(), fast_id.fingerprint());
+        assert!(!stalled_setup.is_finished());
+        stalled_setup.abort();
+    }
+
+    #[tokio::test]
+    async fn stalled_setup_times_out() {
+        let (_, server) = node();
+        let addr = server.local_addr().unwrap();
+        let started = std::time::Instant::now();
+        let (setup, (_n, _c)) = tokio::join!(spawn_next_setup(&server), stalled_peer(addr));
+        let result = setup.await.unwrap();
+        assert!(matches!(result, Err(NetError::Closed(_))));
+        assert!(started.elapsed() < SETUP_TIMEOUT + Duration::from_secs(2));
     }
 }
