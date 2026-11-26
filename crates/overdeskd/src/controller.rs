@@ -2,12 +2,15 @@
 //! What the app runs: one long-lived task that listens, dials, pairs and runs sessions.
 //! The UI sends [`Command`]s and renders the [`AppState`] it publishes; nothing else.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use overdesk_core::engine::{Action, Mode};
+use overdesk_net::discovery::{Advertiser, Browser, Change, Nearby};
+use overdesk_net::pairing::{Fingerprint, peer_id};
 use overdesk_net::session::{Me, SessionError, pair};
 use overdesk_net::store::Store;
 use overdesk_net::transport::{Link, NetError, Node};
@@ -26,6 +29,8 @@ pub struct Config {
     pub listen: SocketAddr,
     /// This device's name, operating system and screen size, sent to every peer.
     pub me: Me,
+    /// Whether to announce this device on the local network and list the others.
+    pub discovery: bool,
 }
 
 /// Where the controller is in its connection lifecycle; the UI picks its screen from this.
@@ -80,6 +85,19 @@ pub struct ScreenView {
     pub me: bool,
 }
 
+/// Another Overdesk computer seen on the local network.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NearbyDevice {
+    /// The device's name.
+    pub name: String,
+    /// The device's operating system.
+    pub os: Os,
+    /// Where to dial it; pass it to [`Command::Connect`].
+    pub address: SocketAddr,
+    /// Whether this device is already paired (pinned) with this one.
+    pub paired: bool,
+}
+
 /// Everything the UI shows, published by the controller after every change.
 /// The UI renders it and holds no connection state of its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +114,8 @@ pub struct AppState {
     pub desk: Vec<ScreenView>,
     /// Whether unknown devices may currently start pairing with this one.
     pub pairing_open: bool,
+    /// Other Overdesk computers on the network, sorted by name.
+    pub nearby: Vec<NearbyDevice>,
 }
 
 /// What the UI asks the controller to do. Commands are the controller's only input.
@@ -141,6 +161,8 @@ struct Shared<P> {
     /// Which session may write state. Bumped on Disconnect and whenever a session starts,
     /// so a task that outlives its abort cannot overwrite a newer phase.
     generation: AtomicU64,
+    /// Devices heard on the network, by id.
+    found: Mutex<BTreeMap<PeerId, Nearby>>,
     /// This device's identity and pinned peers.
     store: Store,
     /// Who this device is, as sent to peers.
@@ -162,6 +184,13 @@ impl<P> Shared<P> {
     fn set_pairing(&self, until: Option<tokio::time::Instant>) {
         *self.pairing_until.lock().expect("pairing lock") = until;
         self.state.send_modify(|s| s.pairing_open = until.is_some());
+    }
+
+    /// Recomputes the published `nearby` list from what was heard and what is pinned.
+    fn refresh_nearby(&self) {
+        let pins = self.store.pins().unwrap_or_default();
+        let list = nearby_list(&self.found.lock().expect("found lock"), &pins);
+        self.state.send_modify(|s| s.nearby = list);
     }
 
     /// Publishes a new phase and, if given, a new Desk view, unless `generation` is stale.
@@ -206,18 +235,39 @@ pub async fn spawn<P: Platform + Clone + Sync>(
         phase: Phase::Idle,
         desk: Vec::new(),
         pairing_open: false,
+        nearby: Vec::new(),
     });
     let shared = Arc::new(Shared {
         state,
         answer: Mutex::new(None),
         pairing_until: Mutex::new(None),
         generation: AtomicU64::new(0),
+        found: Mutex::new(BTreeMap::new()),
         store,
         me: config.me,
         platform,
     });
+    // shortcut: a device that cannot use mDNS (no interface) simply has no nearby list.
+    let discovery = config.discovery.then(|| {
+        let port = node.local_addr().ok()?.port();
+        let id = peer_id(&identity.fingerprint());
+        let advertiser = Advertiser::start(id, &shared.me.name, shared.me.os, port).ok()?;
+        let (browser, changes) = Browser::start(id).ok()?;
+        let shared = shared.clone();
+        // Ends when the browser drops with the controller and closes the channel.
+        std::thread::spawn(move || {
+            while let Ok(change) = changes.recv() {
+                apply(&mut shared.found.lock().expect("found lock"), change);
+                shared.refresh_nearby();
+            }
+        });
+        Some((advertiser, browser))
+    });
     let (commands, rx) = mpsc::unbounded_channel();
-    tokio::spawn(control(Arc::new(node), shared, rx));
+    tokio::spawn(async move {
+        control(Arc::new(node), shared, rx).await;
+        drop(discovery); // announced and browsing for exactly as long as the controller runs
+    });
     Ok((commands, state_rx))
 }
 
@@ -362,6 +412,7 @@ async fn session<P: Platform + Clone + Sync>(
                         None,
                     );
                 }
+                shared.refresh_nearby();
             }
             Err(SessionError::Declined) => {
                 return shared.set(
@@ -430,4 +481,87 @@ fn desk_view(s: &Session, my_name: &str) -> Vec<ScreenView> {
             me: d.peer == s.me,
         })
         .collect()
+}
+
+/// Folds one network change into the devices heard so far: a device is kept by id, so
+/// re-announcing replaces it, and `Lost` removes it.
+fn apply(found: &mut BTreeMap<PeerId, Nearby>, change: Change) {
+    match change {
+        Change::Found(n) => {
+            found.insert(n.id, n);
+        }
+        Change::Lost(id) => {
+            found.remove(&id);
+        }
+    }
+}
+
+/// The list the UI shows: sorted by name, each device marked paired when a pinned
+/// fingerprint starts with its id (a [`PeerId`] is a fingerprint's first 16 bytes).
+fn nearby_list(found: &BTreeMap<PeerId, Nearby>, pins: &BTreeSet<Fingerprint>) -> Vec<NearbyDevice> {
+    let paired: BTreeSet<PeerId> = pins.iter().map(peer_id).collect();
+    let mut list: Vec<_> = found
+        .values()
+        .map(|n| NearbyDevice {
+            name: n.name.clone(),
+            os: n.os,
+            address: n.address,
+            paired: paired.contains(&n.id),
+        })
+        .collect();
+    list.sort_by(|a, b| a.name.cmp(&b.name));
+    list
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A device seen on the network, with a one-byte id and an address derived from it.
+    fn seen(n: u8, name: &str) -> Nearby {
+        Nearby {
+            id: PeerId([n; 16]),
+            name: name.into(),
+            os: Os::Windows,
+            address: SocketAddr::from(([10, 0, 0, n], 24801)),
+        }
+    }
+
+    #[test]
+    fn list_is_sorted_by_name_and_deduplicated_by_id() {
+        let mut found = BTreeMap::new();
+        for n in [seen(1, "Zed"), seen(2, "Alpha"), seen(1, "Zed renamed")] {
+            apply(&mut found, Change::Found(n));
+        }
+        let names: Vec<_> = nearby_list(&found, &BTreeSet::new())
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(names, ["Alpha", "Zed renamed"]);
+    }
+
+    #[test]
+    fn lost_removes_the_entry() {
+        let mut found = BTreeMap::new();
+        apply(&mut found, Change::Found(seen(1, "A")));
+        apply(&mut found, Change::Lost(PeerId([1; 16])));
+        apply(&mut found, Change::Lost(PeerId([9; 16])));
+        assert!(nearby_list(&found, &BTreeSet::new()).is_empty());
+    }
+
+    #[test]
+    fn paired_means_a_pin_starts_with_the_peer_id() {
+        let mut found = BTreeMap::new();
+        apply(&mut found, Change::Found(seen(1, "Known")));
+        apply(&mut found, Change::Found(seen(2, "Stranger")));
+        let mut fp = [0u8; 32];
+        fp[..16].fill(1);
+        fp[16..].fill(0xff); // the rest of the fingerprint must not matter
+        let list = nearby_list(&found, &BTreeSet::from([fp]));
+        assert_eq!(
+            list.iter().map(|d| (d.name.as_str(), d.paired)).collect::<Vec<_>>(),
+            [("Known", true), ("Stranger", false)]
+        );
+        assert_eq!(list[0].address, SocketAddr::from(([10, 0, 0, 1], 24801)));
+    }
 }

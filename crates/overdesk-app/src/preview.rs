@@ -8,7 +8,7 @@ use iced::Task;
 use iced::theme::Mode as ThemeMode;
 use overdesk_core::engine::Mode;
 use overdesk_proto::{Os, PeerId};
-use overdeskd::controller::{AppState, Phase, ScreenView};
+use overdeskd::controller::{AppState, NearbyDevice, Phase, ScreenView};
 
 use crate::Message;
 
@@ -57,6 +57,24 @@ pub fn state(which: &str) -> (AppState, Option<(bool, bool)>) {
         phase,
         desk,
         pairing_open: which == "pairing-open",
+        nearby: if which == "idle" {
+            vec![
+                NearbyDevice {
+                    name: "Studio Mac".into(),
+                    os: Os::MacOs,
+                    address: "192.168.1.20:24801".parse().unwrap(),
+                    paired: true,
+                },
+                NearbyDevice {
+                    name: "Work PC".into(),
+                    os: Os::Windows,
+                    address: "192.168.1.50:24801".parse().unwrap(),
+                    paired: false,
+                },
+            ]
+        } else {
+            vec![]
+        },
     };
     (state, perms)
 }

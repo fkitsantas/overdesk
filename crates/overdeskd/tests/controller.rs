@@ -36,6 +36,7 @@ fn config(name: &str, os: Os, w: u32, h: u32) -> Config {
     Config {
         store_dir: store(name),
         listen: "127.0.0.1:0".parse().unwrap(),
+        discovery: false,
         me: Me {
             name: name.into(),
             os,
@@ -267,4 +268,34 @@ async fn connect_while_connected_leaves_the_session_alone() {
         "{:?}",
         a.borrow().phase
     );
+}
+
+#[tokio::test]
+#[ignore = "needs multicast"]
+async fn controllers_with_discovery_see_each_other_nearby() {
+    let on = |name, os| Config {
+        discovery: true,
+        ..config(name, os, 1440, 900)
+    };
+    let (_a_cmd, mut a) = spawn(on("disc-a", Os::MacOs), Fake).await.unwrap();
+    let (_b_cmd, mut b) = spawn(on("disc-b", Os::Windows), Fake).await.unwrap();
+    let b_port = b.borrow().address.unwrap().port();
+    let seen = tokio::time::timeout(Duration::from_secs(15), async {
+        a.wait_for(|s| s.nearby.iter().any(|d| d.name == "disc-b"))
+            .await
+            .map(|s| s.nearby.clone())
+    })
+    .await
+    .expect("A sees B within 15 s")
+    .unwrap();
+    let d = seen.iter().find(|d| d.name == "disc-b").unwrap();
+    assert_eq!((d.os, d.paired, d.address.port()), (Os::Windows, false, b_port));
+    assert!(!seen.iter().any(|d| d.name == "disc-a"), "never lists itself");
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        b.wait_for(|s| s.nearby.iter().any(|d| d.name == "disc-a")),
+    )
+    .await
+    .expect("B sees A within 15 s")
+    .unwrap();
 }

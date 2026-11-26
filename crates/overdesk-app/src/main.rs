@@ -9,7 +9,7 @@ mod desk;
 mod preview;
 mod style;
 
-use std::net::{IpAddr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::OnceLock;
 
 use iced::futures::SinkExt;
@@ -96,6 +96,8 @@ struct App {
     /// Whether the user has answered the pairing code and is waiting for the peer.
     /// Reset whenever the phase leaves [`Phase::Pairing`].
     answered: bool,
+    /// Whether the "Enter an address instead" fallback is expanded.
+    show_address: bool,
 }
 
 /// Everything that can change the app: controller events, system events and user input.
@@ -109,6 +111,10 @@ enum Message {
     Theme(ThemeMode),
     /// An animation frame while the cursor is on another device.
     Frame,
+    /// Show or hide the address fallback.
+    ToggleAddress,
+    /// Re-open the pairing window while the idle screen is showing.
+    KeepPairingOpen,
     /// The address field changed.
     Address(String),
     /// The user picked which side the other device is on.
@@ -152,6 +158,7 @@ impl App {
                 side: Side::Right,
                 phase: 0.3,
                 answered: false,
+                show_address: false,
             };
             return (app, preview::shoot());
         }
@@ -172,6 +179,7 @@ impl App {
             side: Side::Right,
             phase: 0.0,
             answered: false,
+            show_address: false,
         };
         let theme = iced::system::theme().map(Message::Theme);
         (
@@ -187,13 +195,25 @@ impl App {
     /// Applies a message. Connection changes happen only by sending controller commands.
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Started(Ok((commands, state))) => self.screen = Screen::Running { commands, state },
+            Message::Started(Ok((commands, state))) => {
+                // The first state is idle: open pairing, as on every entry to idle.
+                if state.phase == Phase::Idle {
+                    let _ = commands.send(Command::AllowPairing(true));
+                }
+                self.screen = Screen::Running { commands, state };
+            }
             Message::Started(Err(e)) => self.screen = Screen::Failed(e),
             Message::State(new) => {
                 if !matches!(new.phase, Phase::Pairing { .. }) {
                     self.answered = false;
                 }
-                if let Screen::Running { state, .. } = &mut self.screen {
+                if let Screen::Running { state, commands } = &mut self.screen {
+                    // Pairing stays open exactly while the idle screen shows.
+                    match (state.phase == Phase::Idle, new.phase == Phase::Idle) {
+                        (false, true) => _ = commands.send(Command::AllowPairing(true)),
+                        (true, false) => _ = commands.send(Command::AllowPairing(false)),
+                        _ => {}
+                    }
                     *state = new;
                 }
             }
@@ -213,6 +233,8 @@ impl App {
             }
             Message::Theme(mode) => self.theme = mode,
             Message::Frame => self.phase = (self.phase + 0.04) % 1.0,
+            Message::ToggleAddress => self.show_address = !self.show_address,
+            Message::KeepPairingOpen => self.send(Command::AllowPairing(true)),
             Message::Address(a) => self.address = a,
             Message::Side(s) => self.side = s,
             Message::Connect => {
@@ -256,6 +278,10 @@ impl App {
         }
         if let Screen::Running { state, .. } = &self.screen {
             subs.push(Subscription::run(watch_state));
+            // The pairing window lasts 120 s; renew it before it closes.
+            if state.phase == Phase::Idle {
+                subs.push(iced::time::every(std::time::Duration::from_secs(90)).map(|_| Message::KeepPairingOpen));
+            }
             // Animate the ribbon only while the cursor is on another device.
             if matches!(
                 state.phase,
@@ -422,8 +448,8 @@ impl App {
         }
     }
 
-    /// The pairing form: the other device's address, which side it is on, and this
-    /// device's own address and pairing control.
+    /// "Pair a device": which side the other computer is on, the computers found on the
+    /// network, and a collapsed fallback for typing an address.
     fn idle_view<'a>(&'a self, state: &'a AppState) -> Element<'a, Message> {
         let here = device_word(state.os);
         let side = |s: Side, label: &'static str| {
@@ -432,6 +458,38 @@ impl App {
                 .style(style::segment(self.side == s))
                 .on_press(Message::Side(s))
         };
+        let nearby: Element<'a, Message> = if state.nearby.is_empty() {
+            column![
+                text("Looking for computers on your network…").font(bold()),
+                text("Open Overdesk on your other computer. It will appear here.").style(muted),
+            ]
+            .spacing(4)
+            .into()
+        } else {
+            column(state.nearby.iter().map(|d| {
+                let go = button(text(if d.paired { "Connect" } else { "Pair" }))
+                    .padding([8, 16])
+                    .style(style::primary)
+                    .on_press(Message::Send(Command::Connect {
+                        address: d.address,
+                        side: self.side,
+                    }));
+                let mut info = row![text(os_word(d.os)).style(muted)].spacing(8);
+                if d.paired {
+                    info = info.push(text("Paired").color(style::TEAL));
+                }
+                row![
+                    column![text(d.name.as_str()).font(bold()), info].spacing(2),
+                    Space::new().width(Fill),
+                    go,
+                ]
+                .align_y(Alignment::Center)
+                .into()
+            }))
+            .spacing(14)
+            .into()
+        };
+
         let valid = parse_address(&self.address).is_some();
         let connect = button(text("Connect")).padding([9, 18]).style(style::primary);
         let connect = if valid {
@@ -439,52 +497,46 @@ impl App {
         } else {
             connect
         };
-
-        // The controller binds 0.0.0.0; show the LAN address another device can actually dial.
-        let my_address = state
-            .address
-            .map(|a| SocketAddr::new(lan_ip().unwrap_or(a.ip()), a.port()).to_string())
-            .unwrap_or_else(|| "not listening".into());
-        let pairing = if state.pairing_open {
-            row![
-                text("Pairing is open for 2 minutes.").style(muted),
-                Space::new().width(Fill),
-                button(text("Close"))
-                    .padding([8, 14])
-                    .style(style::secondary)
-                    .on_press(Message::Send(Command::AllowPairing(false))),
-            ]
-        } else {
-            row![
-                text(format!("This {here}: {my_address}")).style(muted),
-                Space::new().width(Fill),
-                button(text("Allow pairing"))
-                    .padding([8, 14])
-                    .style(style::secondary)
-                    .on_press(Message::Send(Command::AllowPairing(true))),
-            ]
-        };
+        let mut fallback = column![
+            button(
+                text(if self.show_address {
+                    "Hide address"
+                } else {
+                    "Enter an address instead"
+                })
+                .size(13)
+            )
+            .padding([6, 12])
+            .style(style::secondary)
+            .on_press(Message::ToggleAddress)
+        ]
+        .spacing(10);
+        if self.show_address {
+            fallback = fallback.push(
+                row![
+                    text_input("192.168.1.50", &self.address)
+                        .on_input(Message::Address)
+                        .on_submit(Message::Connect)
+                        .padding(10)
+                        .style(style::field),
+                    connect
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            );
+        }
 
         column![
             title("Pair a device".into()),
-            text(format!("Open Overdesk on your other computer, then enter its address to share this {here}'s keyboard and mouse with it.")).style(muted),
+            text(format!("Share this {here}'s keyboard and mouse with another computer.")).style(muted),
             Space::new().height(18),
-            container(
-                column![
-                    text("Address of the other computer").size(13).style(muted),
-                    text_input("192.168.1.50", &self.address).on_input(Message::Address).on_submit(Message::Connect).padding(10).style(style::field),
-                    Space::new().height(6),
-                    text(format!("Where is it, next to this {here}?")).size(13).style(muted),
-                    row![side(Side::Left, "On the left"), side(Side::Right, "On the right"), Space::new().width(Fill), connect]
-                        .spacing(8)
-                        .align_y(Alignment::Center),
-                ]
-                .spacing(8),
-            )
-            .padding(18)
-            .style(style::panel),
-            Space::new().height(18),
-            pairing.align_y(Alignment::Center),
+            text(format!("Where is it, next to this {here}?")).size(13).style(muted),
+            row![side(Side::Left, "On the left"), side(Side::Right, "On the right")].spacing(8),
+            Space::new().height(8),
+            text("Nearby computers").font(bold()),
+            container(nearby).padding(18).width(Fill).style(style::panel),
+            Space::new().height(8),
+            fallback,
         ]
         .spacing(6)
         .into()
@@ -591,6 +643,7 @@ async fn start() -> Result<(mpsc::UnboundedSender<Command>, AppState), String> {
     let config = controller::Config {
         store_dir: store_dir(),
         listen: SocketAddr::from(([0, 0, 0, 0], PORT)),
+        discovery: true,
         me: Me {
             name: device_name(),
             os: this_os(),
@@ -611,13 +664,6 @@ fn parse_address(s: &str) -> Option<SocketAddr> {
     s.parse::<SocketAddr>()
         .ok()
         .or_else(|| s.parse::<IpAddr>().ok().map(|ip| SocketAddr::new(ip, PORT)))
-}
-
-/// This device's LAN address. Connecting a UDP socket only picks a route; it sends nothing.
-fn lan_ip() -> Option<IpAddr> {
-    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("192.0.2.1:9").ok()?; // TEST-NET-1: documentation range, never routed
-    socket.local_addr().ok().map(|a| a.ip())
 }
 
 /// The operating system this build runs on.
