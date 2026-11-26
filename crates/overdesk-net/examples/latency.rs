@@ -1,0 +1,48 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+//! Motion-lane round-trip latency over loopback QUIC.
+//!
+//!   cargo run --release -p overdesk-net --example latency
+
+use std::time::{Duration, Instant};
+
+use overdesk_net::transport::{Identity, Node};
+use overdesk_proto::Motion;
+
+const SAMPLES: usize = 2000;
+
+#[tokio::main]
+async fn main() {
+    let (a_id, b_id) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+    let a = Node::bind(&a_id, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let b = Node::bind(&b_id, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = b.local_addr().unwrap();
+    let (dialer, listener) = tokio::join!(a.connect(addr), async { b.accept().await.unwrap().await });
+    let (dialer, listener) = (dialer.unwrap(), listener.unwrap());
+
+    // Echo every datagram straight back.
+    tokio::spawn(async move {
+        while let Ok(m) = listener.recv_motion().await {
+            let _ = listener.send_motion(&m);
+        }
+    });
+
+    let mut rtts = Vec::with_capacity(SAMPLES);
+    let mut lost = 0;
+    for seq in 0..SAMPLES as u32 {
+        let start = Instant::now();
+        dialer.send_motion(&Motion { seq, x: 1, y: 1 }).unwrap();
+        match tokio::time::timeout(Duration::from_millis(100), dialer.recv_motion()).await {
+            Ok(Ok(m)) if m.seq == seq => rtts.push(start.elapsed()),
+            _ => lost += 1,
+        }
+    }
+    rtts.sort();
+    let pct = |p: f64| rtts[((rtts.len() as f64 * p) as usize).min(rtts.len() - 1)];
+    println!(
+        "motion round trip over loopback, {} samples: p50 {:?}  p99 {:?}  max {:?}  lost {lost}",
+        rtts.len(),
+        pct(0.50),
+        pct(0.99),
+        rtts[rtts.len() - 1]
+    );
+}

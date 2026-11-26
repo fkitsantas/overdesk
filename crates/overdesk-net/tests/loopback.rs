@@ -29,10 +29,10 @@ async fn connected() -> Pair {
     let a = Node::bind(&dialer_id, "127.0.0.1:0".parse().unwrap()).unwrap();
     let b = Node::bind(&listener_id, "127.0.0.1:0".parse().unwrap()).unwrap();
     let addr = b.local_addr().unwrap();
-    let (dialer, listener) = tokio::join!(a.connect(addr), b.accept());
+    let (dialer, listener) = tokio::join!(a.connect(addr), async { b.accept().await.unwrap().await });
     Pair {
         dialer: dialer.unwrap(),
-        listener: listener.unwrap().unwrap(),
+        listener: listener.unwrap(),
         dialer_id,
         listener_id,
         _nodes: (a, b),
@@ -237,6 +237,27 @@ async fn pairing_message_type_is_distinct_on_the_wire() {
         let mut p = connected().await;
         p.dialer.send(&Pairing::Confirm).await.unwrap();
         assert!(p.listener.recv::<Control>().await.is_err());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_stalled_peer_does_not_block_accepting_others() {
+    within(async {
+        let server_id = Identity::generate().unwrap();
+        let server = Node::bind(&server_id, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = server.local_addr().unwrap();
+        let (slow_id, fast_id) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+        let slow = Node::bind(&slow_id, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let fast = Node::bind(&fast_id, "127.0.0.1:0".parse().unwrap()).unwrap();
+
+        // First connection is accepted but its setup is left pending (never awaited)...
+        let (_slow_link, first) = tokio::join!(slow.connect(addr), server.accept());
+        let _pending = first.unwrap();
+        // ...and a second peer still gets through.
+        let (fast_link, second) = tokio::join!(fast.connect(addr), async { server.accept().await.unwrap().await });
+        assert_eq!(second.unwrap().peer_fingerprint(), fast_id.fingerprint());
+        assert!(fast_link.is_ok());
     })
     .await;
 }
