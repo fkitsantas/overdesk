@@ -169,14 +169,14 @@ mod tests {
     #[test]
     fn every_message_round_trips() {
         for msg in all_messages() {
-            let frame = encode(&msg);
+            let frame = encode(&msg).unwrap();
             assert_eq!(decode(&frame), Ok(Some((msg, frame.len()))));
         }
     }
 
     #[test]
     fn partial_frame_needs_more_bytes() {
-        let frame = encode(&Message::Leave);
+        let frame = encode(&Message::Leave).unwrap();
         for cut in 0..frame.len() {
             assert_eq!(decode(&frame[..cut]), Ok(None), "cut at {cut}");
         }
@@ -184,11 +184,12 @@ mod tests {
 
     #[test]
     fn back_to_back_frames_decode_in_order() {
-        let mut buf = encode(&Message::Leave);
+        let mut buf = encode(&Message::Leave).unwrap();
         buf.extend(encode(&Message::Key {
             code: 0xE3,
             pressed: true,
-        }));
+        })
+        .unwrap());
         let (first, used) = decode(&buf).unwrap().unwrap();
         assert_eq!(first, Message::Leave);
         let (second, _) = decode(&buf[used..]).unwrap().unwrap();
@@ -208,6 +209,12 @@ mod tests {
     }
 
     #[test]
+    fn oversized_message_refuses_to_encode() {
+        let msg = Message::Clipboard { text: "x".repeat(2 * MAX_FRAME_LEN) };
+        assert!(matches!(encode(&msg), Err(FrameError::TooLarge(_))));
+    }
+
+    #[test]
     fn garbage_payload_is_malformed() {
         let buf = [0, 0, 0, 1, 0xFF];
         assert!(matches!(decode(&buf), Err(FrameError::Malformed(_))));
@@ -215,7 +222,7 @@ mod tests {
 
     #[test]
     fn trailing_bytes_inside_frame_are_malformed() {
-        let mut frame = encode(&Message::Leave);
+        let mut frame = encode(&Message::Leave).unwrap();
         frame.push(0);
         let len = (frame.len() - LEN_PREFIX) as u32;
         frame[..LEN_PREFIX].copy_from_slice(&len.to_be_bytes());

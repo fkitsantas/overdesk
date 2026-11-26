@@ -233,6 +233,16 @@ mod tests {
             Layout::new(vec![screen("a", i32::MAX - 5, 0, 10, 10)]).unwrap_err(),
             LayoutError::OutOfRange("a".into())
         );
+        // right edge fits i32, but width alone does not: local x would overflow.
+        assert_eq!(
+            Layout::new(vec![screen("a", -2_000_000_000, 0, 3_000_000_000, 10)]).unwrap_err(),
+            LayoutError::OutOfRange("a".into())
+        );
+    }
+
+    #[test]
+    fn switcher_rejects_unknown_start_screen() {
+        assert!(Switcher::new(two_screens(), 2).is_none());
     }
 
     #[test]
@@ -242,7 +252,7 @@ mod tests {
 
     #[test]
     fn starts_at_center_of_start_screen() {
-        let mut s = Switcher::new(two_screens(), 1);
+        let mut s = Switcher::new(two_screens(), 1).unwrap();
         assert_eq!(
             s.move_by(0, 0),
             Motion::Within {
@@ -255,7 +265,7 @@ mod tests {
 
     #[test]
     fn moving_inside_screen_stays() {
-        let mut s = Switcher::new(two_screens(), 0);
+        let mut s = Switcher::new(two_screens(), 0).unwrap();
         assert_eq!(
             s.move_by(10, -20),
             Motion::Within {
@@ -268,7 +278,7 @@ mod tests {
 
     #[test]
     fn crossing_right_edge_switches_with_local_entry_point() {
-        let mut s = Switcher::new(two_screens(), 0);
+        let mut s = Switcher::new(two_screens(), 0).unwrap();
         s.move_by(959, 0); // x = 1919, last laptop column
         assert_eq!(
             s.move_by(1, 0),
@@ -284,7 +294,7 @@ mod tests {
 
     #[test]
     fn fast_flick_past_neighbour_lands_on_its_far_edge() {
-        let mut s = Switcher::new(two_screens(), 0);
+        let mut s = Switcher::new(two_screens(), 0).unwrap();
         assert_eq!(
             s.move_by(100_000, 0),
             Motion::Switched {
@@ -298,14 +308,14 @@ mod tests {
 
     #[test]
     fn edge_without_neighbour_clamps() {
-        let mut s = Switcher::new(two_screens(), 0);
+        let mut s = Switcher::new(two_screens(), 0).unwrap();
         assert_eq!(s.move_by(-5000, -5000), Motion::Within { screen: 0, x: 0, y: 0 });
     }
 
     #[test]
     fn taller_neighbour_region_without_counterpart_clamps() {
         // Desk is taller: below y=1080 there is nothing to the left.
-        let mut s = Switcher::new(two_screens(), 1);
+        let mut s = Switcher::new(two_screens(), 1).unwrap();
         s.move_by(0, 600); // y = 1320
         assert_eq!(
             s.move_by(-5000, 0),
@@ -319,7 +329,7 @@ mod tests {
 
     #[test]
     fn round_trip_returns_to_original_screen() {
-        let mut s = Switcher::new(two_screens(), 0);
+        let mut s = Switcher::new(two_screens(), 0).unwrap();
         s.move_by(960, 0);
         assert_eq!(
             s.move_by(-1, 0),
@@ -337,7 +347,7 @@ mod tests {
         // Screen b sits to the right of a; leaving a's top-right corner diagonally
         // up-right has nothing above, but b is to the right.
         let layout = Layout::new(vec![screen("a", 0, 0, 100, 100), screen("b", 100, 0, 100, 100)]).unwrap();
-        let mut s = Switcher::new(layout, 0);
+        let mut s = Switcher::new(layout, 0).unwrap();
         s.move_by(49, -50); // (99, 0) top-right pixel
         assert_eq!(
             s.move_by(5, -5),
