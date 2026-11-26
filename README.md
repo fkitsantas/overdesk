@@ -122,7 +122,7 @@ Read the full design in **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 Requires [Rust](https://rustup.rs). `rust-toolchain.toml` selects the latest stable toolchain.
 
 ```bash
-git clone https://github.com/fkitsantas/Overdesk.git
+git clone https://github.com/fkitsantas/overdesk.git
 cd Overdesk
 ./scripts/check.sh        # fmt, clippy, tests, licenses  (Windows: scripts\check.ps1)
 ```

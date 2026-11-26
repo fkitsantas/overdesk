@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.100"
 license = "AGPL-3.0-only"
-repository = "https://github.com/fkitsantas/Overdesk"
+repository = "https://github.com/fkitsantas/overdesk"
 
 [workspace.dependencies]
 serde = { version = "1.0.229", features = ["derive"] }

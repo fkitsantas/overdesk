@@ -29,7 +29,7 @@ works offline, and covers every device you own.
 The AGPL requires anyone who ships or hosts a modified version of the core to publish
 their source code. To embed Overdesk code in a closed-source or commercial product, open
 an issue titled **"Commercial license inquiry"** at
-<https://github.com/fkitsantas/Overdesk/issues>.
+<https://github.com/fkitsantas/overdesk/issues>.
 
 ## Contributions
 
