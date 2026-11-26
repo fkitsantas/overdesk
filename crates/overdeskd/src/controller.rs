@@ -181,6 +181,43 @@ struct Auto {
     restore: Phase,
 }
 
+/// Failed inbound pairings before further attempts are refused for a while.
+const FREE_PAIRING_FAILURES: u32 = 3;
+
+/// How long inbound pairing is refused after `failures` consecutive failures:
+/// nothing for the first few, then 10 s, 30 s and a 60 s cap.
+fn pairing_backoff(failures: u32) -> Duration {
+    Duration::from_secs(match failures {
+        0..FREE_PAIRING_FAILURES => 0,
+        FREE_PAIRING_FAILURES => 10,
+        4 => 30,
+        _ => 60,
+    })
+}
+
+/// Consecutive failed inbound pairings and the time before which none is accepted.
+/// Global on purpose: an attacker can change address.
+#[derive(Default)]
+struct Backoff {
+    /// Failures since the last successful pairing.
+    failures: u32,
+    /// Inbound pairing is refused until then.
+    until: Option<tokio::time::Instant>,
+}
+
+impl Backoff {
+    /// Whether inbound pairing is refused at `now`.
+    fn blocked(&self, now: tokio::time::Instant) -> bool {
+        self.until.is_some_and(|t| now < t)
+    }
+
+    /// Counts a failed attempt and starts the delay it has earned.
+    fn fail(&mut self, now: tokio::time::Instant) {
+        self.failures = self.failures.saturating_add(1);
+        self.until = Some(now + pairing_backoff(self.failures));
+    }
+}
+
 /// Everything a session task needs from the controller.
 struct Shared<P> {
     /// The store folder, which also holds [`SIDES_FILE`].
@@ -198,6 +235,8 @@ struct Shared<P> {
     answer: Mutex<Option<oneshot::Sender<bool>>>,
     /// Until when unknown devices dialing in may pair. Closed by default.
     pairing_until: Mutex<Option<tokio::time::Instant>>,
+    /// Failed inbound pairings, which stall further ones. Survives the window closing.
+    backoff: Mutex<Backoff>,
     /// Which session may write state. Bumped on Disconnect and whenever a session starts,
     /// so a task that outlives its abort cannot overwrite a newer phase.
     generation: AtomicU64,
@@ -214,10 +253,13 @@ struct Shared<P> {
 impl<P> Shared<P> {
     /// Whether an unknown device dialing in may start pairing right now.
     fn pairing_allowed(&self) -> bool {
-        self.pairing_until
+        let now = tokio::time::Instant::now();
+        let open = self
+            .pairing_until
             .lock()
             .expect("pairing lock")
-            .is_some_and(|t| tokio::time::Instant::now() < t)
+            .is_some_and(|t| now < t);
+        open && !self.backoff.lock().expect("backoff lock").blocked(now)
     }
 
     /// Opens pairing until `until`, or closes it with `None`, and tells the UI.
@@ -285,6 +327,7 @@ pub async fn spawn<P: Platform + Clone + Sync>(
         retry_after: Mutex::new(BTreeMap::new()),
         answer: Mutex::new(None),
         pairing_until: Mutex::new(None),
+        backoff: Mutex::new(Backoff::default()),
         generation: AtomicU64::new(0),
         found: Mutex::new(BTreeMap::new()),
         store,
@@ -564,7 +607,15 @@ async fn session<P: Platform + Clone + Sync>(
             );
             rx.await.unwrap_or(false)
         };
-        match pair(&mut link, confirm).await {
+        let paired = pair(&mut link, confirm).await;
+        if inbound {
+            let mut b = shared.backoff.lock().expect("backoff lock");
+            match paired {
+                Ok(_) => *b = Backoff::default(),
+                Err(_) => b.fail(tokio::time::Instant::now()),
+            }
+        }
+        match paired {
             Ok(fp) => {
                 // Close the window only if this pairing used it, not the user's own dial.
                 if inbound {
@@ -777,6 +828,27 @@ mod tests {
         apply(&mut found, Change::Lost(PeerId([1; 16])));
         apply(&mut found, Change::Lost(PeerId([9; 16])));
         assert!(nearby_list(&found, &BTreeSet::new()).is_empty());
+    }
+
+    #[test]
+    fn backoff_grows_and_caps() {
+        let secs = |n| pairing_backoff(n).as_secs();
+        assert_eq!([0, 1, 2, 3, 4, 5, 99].map(secs), [0, 0, 0, 10, 30, 60, 60]);
+    }
+
+    #[test]
+    fn backoff_blocks_only_until_its_deadline() {
+        let t0 = tokio::time::Instant::now();
+        let mut b = Backoff::default();
+        for _ in 0..2 {
+            b.fail(t0);
+        }
+        assert!(!b.blocked(t0), "the first failures are free");
+        b.fail(t0);
+        assert!(b.blocked(t0 + Duration::from_secs(9)));
+        assert!(!b.blocked(t0 + Duration::from_secs(10)));
+        b.fail(t0);
+        assert!(b.blocked(t0 + Duration::from_secs(29)));
     }
 
     #[test]

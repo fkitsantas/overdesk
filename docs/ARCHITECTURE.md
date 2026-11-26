@@ -128,9 +128,9 @@ On top of that:
 - At most 64 handshakes can be in progress at once.
 - Control and motion messages are refused until the peer's fingerprint is pinned.
 
-Planned with the daemon:
+Also built into the daemon:
 - Pairing is accepted only while the user has "Pair a device" open, and only one at a time.
-- Repeated failed pairings back off.
+- Repeated failed pairings back off: after 3 failures, inbound pairing is refused for 10 s, then 30 s, then 60 s. The count is global and survives closing the window; a successful pairing resets it. Your own outbound dials are never blocked.
 
 ## 8. Install once, update without admin
 

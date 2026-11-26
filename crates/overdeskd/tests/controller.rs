@@ -153,6 +153,33 @@ async fn unknown_device_cannot_prompt_unless_pairing_is_open() {
     assert_eq!(b.borrow().phase, Phase::Idle, "B never showed a code");
 }
 
+#[tokio::test]
+async fn repeated_failed_pairings_back_off_even_with_the_window_open() {
+    let (a_cmd, mut a) = spawn(config("mac4", Os::MacOs, 1440, 900), Fake).await.unwrap();
+    let (b_cmd, mut b) = spawn(config("pc4", Os::Windows, 1920, 1080), Fake).await.unwrap();
+    let b_addr = b.borrow().address.unwrap();
+    b_cmd.send(Command::AllowPairing(true)).unwrap();
+    let dial = || Command::Connect {
+        address: b_addr,
+        side: Side::Right,
+        expect: None,
+    };
+    for _ in 0..3 {
+        a_cmd.send(dial()).unwrap();
+        wait(&mut a, "A code", |p| matches!(p, Phase::Pairing { .. })).await;
+        wait(&mut b, "B code", |p| matches!(p, Phase::Pairing { .. })).await;
+        a_cmd.send(Command::AnswerCode(true)).unwrap();
+        b_cmd.send(Command::AnswerCode(false)).unwrap();
+        wait(&mut a, "A error", |p| matches!(p, Phase::Error(_))).await;
+        wait(&mut b, "B error", |p| matches!(p, Phase::Error(_))).await;
+    }
+    // The window is still open, but the fourth attempt is refused without a prompt.
+    assert!(b.borrow().pairing_open);
+    a_cmd.send(dial()).unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(matches!(b.borrow().phase, Phase::Error(_)), "B never showed a code");
+}
+
 /// A platform whose first `swallow(false)` blocks its thread, standing in for a session
 /// that is mid-cleanup (and so cannot be aborted) when the user disconnects.
 #[derive(Clone)]
