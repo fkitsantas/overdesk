@@ -323,3 +323,39 @@ async fn silent_peer_cannot_hold_pairing_open() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn split_halves_send_and_receive_concurrently() {
+    within(async {
+        let p = trusted().await;
+        let (dtx, mut drx) = p.dialer.split().unwrap();
+        let (ltx, mut lrx) = p.listener.split().unwrap();
+        let (mut dtx, mut ltx) = (dtx, ltx);
+        // Both readers park first, then both writers send: no lock-step needed.
+        let readers = tokio::spawn(async move {
+            let a = lrx.recv_control().await.unwrap();
+            let b = drx.recv_control().await.unwrap();
+            (a, b)
+        });
+        dtx.send_control(&Control::Key { code: 4, pressed: true })
+            .await
+            .unwrap();
+        ltx.send_control(&Control::Key { code: 5, pressed: true })
+            .await
+            .unwrap();
+        let (a, b) = readers.await.unwrap();
+        assert_eq!(a, Control::Key { code: 4, pressed: true });
+        assert_eq!(b, Control::Key { code: 5, pressed: true });
+        dtx.send_motion(&Motion { seq: 1, x: 2, y: 3 }).unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn only_trusted_links_split() {
+    within(async {
+        let p = connected().await;
+        assert!(matches!(p.dialer.split(), Err(NetError::Untrusted)));
+    })
+    .await;
+}
