@@ -4,6 +4,7 @@
 //! - Control lane: reliable stream of length-prefixed [`Control`] frames.
 //! - Motion lane: unreliable datagrams, one bare [`Motion`] each, newest wins via [`SeqGate`].
 
+#![cfg_attr(test, allow(clippy::missing_docs_in_private_items))] // test names document themselves
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 pub const PROTOCOL_VERSION: u16 = 1;

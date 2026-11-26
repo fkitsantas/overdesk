@@ -2,6 +2,7 @@
 //! The Overdesk daemon: wires capture, the network and injection to the Desk engine.
 //! Platform-free; `main.rs` supplies the OS adapter.
 
+#![cfg_attr(test, allow(clippy::missing_docs_in_private_items))] // test names document themselves
 pub mod controller;
 #[cfg(any(target_os = "macos", windows))]
 pub mod native;

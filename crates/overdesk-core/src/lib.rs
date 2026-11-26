@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Platform-free Overdesk logic: screen layout, cursor handoff, held-key tracking.
 
+#![cfg_attr(test, allow(clippy::missing_docs_in_private_items))] // test names document themselves
 use std::collections::BTreeSet;
 
 pub mod engine;

@@ -4,6 +4,7 @@
 //! Translation tables are pure and compile on every OS, so CI tests them everywhere;
 //! only the thin FFI layers are `cfg`-gated.
 
+#![cfg_attr(test, allow(clippy::missing_docs_in_private_items))] // test names document themselves
 pub mod input;
 pub mod mac;
 pub mod win;

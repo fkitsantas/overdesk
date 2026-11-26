@@ -10,6 +10,7 @@
 //! since process exit always returns input to this device.
 //! `OVERDESK_HOME` overrides where the identity and pinned peers are stored.
 
+#![cfg_attr(test, allow(clippy::missing_docs_in_private_items))] // test names document themselves
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;

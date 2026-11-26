@@ -17,6 +17,10 @@ overdesk-proto = { path = "crates/overdesk-proto" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
+# Every public item is documented.
+missing_docs = "warn"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+# Every private item is documented too: the codebase reads as a whole.
+missing_docs_in_private_items = "warn"

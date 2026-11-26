@@ -1,0 +1,140 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+//! The Desk map: real screens to scale, joined by the brand ribbon. The screen with the
+//! cursor glows teal; while crossing, light flows along the ribbon toward it.
+
+use iced::mouse::Cursor;
+use iced::widget::canvas::{self, Frame, Geometry, Path, Program, Stroke, Text, gradient::Linear};
+use iced::{Point, Rectangle, Renderer, Size, Theme, alignment};
+use overdesk_core::engine::Mode;
+use overdeskd::controller::ScreenView;
+
+use crate::style::{INDIGO, TEAL, VIOLET, alpha, hairline, ink, muted};
+
+pub struct DeskMap<'a> {
+    pub screens: &'a [ScreenView],
+    pub mode: Mode,
+    /// 0.0..1.0, advanced by animation frames while the cursor is away.
+    pub phase: f32,
+}
+
+const GAP: f32 = 16.0;
+const PAD: f32 = 12.0;
+
+impl<Message> Program<Message> for DeskMap<'_> {
+    type State = ();
+
+    fn draw(&self, _: &(), renderer: &Renderer, theme: &Theme, bounds: Rectangle, _: Cursor) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        if self.screens.is_empty() {
+            return vec![frame.into_geometry()];
+        }
+        let min_x = self.screens.iter().map(|s| s.x).min().unwrap_or(0) as f32;
+        let min_y = self.screens.iter().map(|s| s.y).min().unwrap_or(0) as f32;
+        let max_x = self.screens.iter().map(|s| s.x as f32 + s.w as f32).fold(0.0, f32::max);
+        let max_y = self.screens.iter().map(|s| s.y as f32 + s.h as f32).fold(0.0, f32::max);
+        let gaps = (self.screens.len() - 1) as f32 * GAP;
+        let scale =
+            ((bounds.width - 2.0 * PAD - gaps) / (max_x - min_x)).min((bounds.height - 2.0 * PAD) / (max_y - min_y));
+        let drawn_w = (max_x - min_x) * scale + gaps;
+        let ox = (bounds.width - drawn_w) / 2.0;
+        let oy = (bounds.height - (max_y - min_y) * scale) / 2.0;
+
+        let mut ordered: Vec<&ScreenView> = self.screens.iter().collect();
+        ordered.sort_by_key(|s| s.x);
+        let rects: Vec<(Rectangle, &ScreenView)> = ordered
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let r = Rectangle::new(
+                    Point::new(
+                        ox + (s.x as f32 - min_x) * scale + i as f32 * GAP,
+                        oy + (s.y as f32 - min_y) * scale,
+                    ),
+                    Size::new(s.w as f32 * scale, s.h as f32 * scale),
+                );
+                (r, *s)
+            })
+            .collect();
+
+        let active_is_me = !matches!(self.mode, Mode::Driving(_));
+        for (r, s) in &rects {
+            let on = s.me == active_is_me;
+            let shape = Path::rounded_rectangle(r.position(), r.size(), 12.0.into());
+            frame.fill(&shape, if on { alpha(TEAL, 0.12) } else { alpha(ink(theme), 0.04) });
+            frame.stroke(
+                &shape,
+                Stroke::default()
+                    .with_color(if on { TEAL } else { hairline(theme) })
+                    .with_width(if on { 2.0 } else { 1.0 }),
+            );
+            frame.fill_text(Text {
+                content: s.name.clone(),
+                position: Point::new(r.x + 14.0, r.y + 14.0),
+                color: ink(theme),
+                size: 14.0.into(),
+                font: iced::Font {
+                    weight: iced::font::Weight::Semibold,
+                    ..iced::Font::with_name("Inter")
+                },
+                align_y: alignment::Vertical::Top,
+                ..Text::default()
+            });
+            frame.fill_text(Text {
+                content: if s.me {
+                    "This device".into()
+                } else {
+                    format!("{} × {}", s.w, s.h)
+                },
+                position: Point::new(r.x + 14.0, r.y + 34.0),
+                color: muted(theme),
+                size: 12.0.into(),
+                align_y: alignment::Vertical::Top,
+                ..Text::default()
+            });
+        }
+
+        // The ribbon: from low in the left screen, up through the gap, into the right one.
+        if let [(a, _), (b, _), ..] = rects.as_slice() {
+            // Starts low in the left screen and ends low in the right one, clear of the labels.
+            let start = Point::new(a.x + a.width * 0.5, a.y + a.height * 0.82);
+            let end = Point::new(b.x + b.width * 0.5, b.y + b.height * 0.72);
+            let mid = (a.x + a.width + b.x) / 2.0;
+            let ribbon = Path::new(|p| {
+                p.move_to(start);
+                p.bezier_curve_to(Point::new(mid, start.y), Point::new(mid, end.y), end);
+            });
+            let gradient = Linear::new(start, end).add_stop(0.0, VIOLET).add_stop(1.0, INDIGO);
+            frame.stroke(
+                &ribbon,
+                Stroke {
+                    style: canvas::Style::Gradient(gradient.into()),
+                    width: 4.0,
+                    line_cap: canvas::LineCap::Round,
+                    ..Stroke::default()
+                },
+            );
+            if self.mode != Mode::Local {
+                // Light flows toward whichever screen has the cursor.
+                let dir = if matches!(self.mode, Mode::Driven(_)) {
+                    -1.0
+                } else {
+                    1.0
+                };
+                frame.stroke(
+                    &ribbon,
+                    Stroke {
+                        style: canvas::Style::Solid(alpha(iced::Color::WHITE, 0.9)),
+                        width: 2.0,
+                        line_cap: canvas::LineCap::Round,
+                        line_dash: canvas::LineDash {
+                            segments: &[6.0, 14.0],
+                            offset: (-dir * self.phase * 20.0).rem_euclid(20.0) as usize,
+                        },
+                        ..Stroke::default()
+                    },
+                );
+            }
+        }
+        vec![frame.into_geometry()]
+    }
+}

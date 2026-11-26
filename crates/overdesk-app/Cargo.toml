@@ -5,9 +5,24 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Overdesk desktop app"
+
+[[bin]]
+name = "overdesk"
+path = "src/main.rs"
 
 [dependencies]
-iced = { version = "0.14.0", features = ["tokio", "canvas", "svg", "image", "advanced"] }
+iced = { version = "0.14.0", features = ["tokio", "canvas", "svg", "advanced"] }
+overdesk-core = { path = "../overdesk-core" }
+overdesk-net = { path = "../overdesk-net" }
+overdesk-proto.workspace = true
+overdeskd = { path = "../overdeskd" }
+tokio = { version = "1.54.1", features = ["sync", "time"] }
+png = { version = "0.18.1", optional = true }
+
+[features]
+# Design review only: renders a fixed state, saves a screenshot, exits. Never shipped.
+preview = ["dep:png"]
 
 [lints]
 workspace = true
