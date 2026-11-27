@@ -20,7 +20,7 @@ overdeskd = { path = "../overdeskd" }
 tokio = { version = "1.54.1", features = ["sync", "time", "rt"] }
 png = "0.18.1"
 cargo-packager-updater = "0.2.3"
-base64 = "0.22"
+base64 = "0.23"
 auto-launch = "0.6.0"
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]

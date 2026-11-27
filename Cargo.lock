@@ -3865,7 +3865,7 @@ name = "overdesk-app"
 version = "0.1.0"
 dependencies = [
  "auto-launch",
- "base64 0.22.1",
+ "base64 0.23.1",
  "cargo-packager-updater",
  "iced",
  "overdesk-core",
