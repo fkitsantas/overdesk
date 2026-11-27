@@ -698,6 +698,8 @@ async fn session<P: Platform + Clone + Sync>(
         Err(DaemonError::Session(SessionError::Net(e))) => {
             return fail(format!("Connection dropped: {e}"), RETRY_AFTER);
         }
+        // Not transient: leave the TV alone for a while instead of redialing every few seconds.
+        Err(e @ DaemonError::NeedsPro) => return fail(e.to_string(), RETRY_AFTER_UNEXPECTED),
         Err(e) => return fail(format!("Couldn't set up the Desk: {e}"), RETRY_AFTER),
     };
     *shared.closer.lock().expect("closer lock") = Some(s.tx.closer());

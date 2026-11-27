@@ -119,6 +119,27 @@ async fn pair_connect_and_lose_a_peer() {
 }
 
 #[tokio::test]
+async fn android_tv_needs_pro() {
+    let (a_cmd, mut a) = spawn(config("mac3", Os::MacOs, 1440, 900), Fake).await.unwrap();
+    let (b_cmd, mut b) = spawn(config("tv3", Os::Android, 1920, 1080), Fake).await.unwrap();
+    let b_addr = b.borrow().address.unwrap();
+    b_cmd.send(Command::AllowPairing(true)).unwrap();
+    a_cmd
+        .send(Command::Connect {
+            address: b_addr,
+            side: Side::Right,
+            expect: None,
+        })
+        .unwrap();
+    wait(&mut a, "A pairing", |p| matches!(p, Phase::Pairing { .. })).await;
+    wait(&mut b, "B pairing", |p| matches!(p, Phase::Pairing { .. })).await;
+    a_cmd.send(Command::AnswerCode(true)).unwrap();
+    b_cmd.send(Command::AnswerCode(true)).unwrap();
+    let s = wait(&mut a, "A refused", |p| matches!(p, Phase::Error(_))).await;
+    assert_eq!(s.phase, Phase::Error("Android TV needs Overdesk Pro".into()));
+}
+
+#[tokio::test]
 async fn declined_pairing_returns_to_idle_with_a_reason() {
     let (a_cmd, mut a) = spawn(config("mac2", Os::MacOs, 1440, 900), Fake).await.unwrap();
     let (b_cmd, mut b) = spawn(config("pc2", Os::Windows, 1920, 1080), Fake).await.unwrap();

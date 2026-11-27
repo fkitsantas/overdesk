@@ -32,6 +32,9 @@ pub enum DaemonError {
     /// The Desk the dialer sent was missing, malformed or could not be adopted.
     #[error("peer did not send a valid Desk: {0}")]
     BadDesk(String),
+    /// The peer is an Android TV, which only Overdesk Pro may share a Desk with.
+    #[error("Android TV needs Overdesk Pro")]
+    NeedsPro,
 }
 
 /// Where the peer's screen sits relative to ours (the dialer decides).
@@ -184,7 +187,8 @@ pub async fn introduce(
     })
 }
 
-/// Trusts a pinned peer, exchanges `Hello`, agrees on one Desk (the dialer authors it,
+/// Trusts a pinned peer, exchanges `Hello`, refuses an Android TV peer (a Pro feature),
+/// agrees on one Desk (the dialer authors it,
 /// the listener validates it with `adopt`), and splits the link.
 pub async fn establish(
     mut link: Link,
@@ -199,6 +203,11 @@ pub async fn establish(
         width,
         height,
     } = introduce(&mut link, pinned, me).await?;
+    // The Free gate for Android TV. Pro's hub calls `introduce`, not `establish`, so it
+    // is never subject to this check.
+    if os == Os::Android {
+        return Err(DaemonError::NeedsPro);
+    }
     let mine = peer_id(&link.local_fingerprint());
     // Screen names come from ids: two Macs both called "MacBook" must not collide.
     let screen = |p: PeerId, x: i32, w: u32, h: u32| DeskScreen {
