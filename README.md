@@ -95,7 +95,7 @@ private never leave the computer. Images and files come with Pro.
 | 6 | **Linux**: X11 (XInput2 capture, XTest injection) and Wayland through the desktop portals (InputCapture, RemoteDesktop), picked at run time | 🧪 Both built; X11 tested on a virtual display, Wayland unit-tested; app, tray, AppImage and .deb built. Real-desktop test pending ([docs/WAYLAND.md](docs/WAYLAND.md)) |
 | 7 | Per-user installers, **signed self-updates without admin rights** (built for managed corporate laptops) with automatic rollback of an update that fails to start (macOS), device keys in Keychain / DPAPI, Overdesk Pro license keys | 🧪 Built; install-and-update test pending. Developer ID / Authenticode signing 🔜 |
 | 7b | **Overdesk Pro**: 3+ computers on one Desk, image and file clipboard, trackpad gestures (native on Mac), licence keys, one official app | 🧪 Built and tested over loopback; real-hardware test pending |
-| 8 | Android TV client (Pro) | 🔭 Stretch |
+| 8 | Android TV client (Pro): pointer, clicks, scrolling, typing and media keys on a TV, driven by your computer. Rust, with a thin Java accessibility shim | 🧪 Built; pairing, pointer and click tested on an Android TV emulator, real-TV test pending |
 
 ## Architecture
 
