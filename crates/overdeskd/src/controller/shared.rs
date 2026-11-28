@@ -13,6 +13,7 @@ use overdesk_net::session::Me;
 use overdesk_net::sync::Relock;
 use overdesk_net::transport::{Closer, NetError};
 use overdesk_proto::PeerId;
+use overdesk_proto::log;
 use tokio::sync::{Notify, watch};
 use tokio::time::Instant;
 
@@ -79,7 +80,7 @@ impl<P> Shared<P> {
     pub(super) fn pins(&self) -> BTreeSet<Fingerprint> {
         let (pins, unreadable) = self.book.load();
         if let Some(e) = unreadable {
-            eprintln!("overdesk: pinned devices unreadable: {e}");
+            log::warn(format_args!("pinned devices unreadable: {e}"));
             self.notify("Couldn't read the list of paired computers, so none can connect.".into());
         }
         pins
@@ -101,7 +102,7 @@ impl<P> Shared<P> {
     /// run: what is lost is only remembered across a restart.
     pub(super) fn saved(&self, result: Result<(), NetError>) {
         if let Err(e) = result {
-            eprintln!("overdesk: could not save a setting: {e}");
+            log::warn(format_args!("could not save a setting: {e}"));
             if !self.save_warned.swap(true, Ordering::SeqCst) {
                 self.notify(
                     "Couldn't save a setting. Overdesk keeps working, but may forget it after a restart.".into(),

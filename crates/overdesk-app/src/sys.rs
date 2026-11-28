@@ -26,6 +26,14 @@ pub(super) async fn start() -> Result<(mpsc::UnboundedSender<Command>, AppState)
         .map_err(|e| e.to_string())?
         .map_err(|e| start_error_text(&StartError::Input(e)))?;
     let (width, height) = overdeskd::native::main_display_size();
+    overdesk_proto::log::info(format_args!(
+        "displays: {}",
+        overdeskd::native::monitors()
+            .iter()
+            .map(|m| format!("{}x{}", m.w, m.h))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
     let config = controller::Config {
         store_dir: store_dir(),
         listen: SocketAddr::from(([0, 0, 0, 0], PORT)),
@@ -48,7 +56,7 @@ pub(super) async fn start() -> Result<(mpsc::UnboundedSender<Command>, AppState)
 
 /// What a person should read when the controller could not start, in place of the raw error.
 pub(super) fn start_error_text(e: &StartError) -> String {
-    eprintln!("overdesk: could not start: {e}");
+    overdesk_proto::log::warn(format_args!("could not start: {e}"));
     match e {
         StartError::Bind(_) => format!(
             "Overdesk couldn't open its network port ({PORT}). Another copy of Overdesk may already be \
@@ -132,6 +140,42 @@ pub(super) fn open_settings(which: Permission) {
     }
     // Other platforms have no settings pane to open.
     let _ = which;
+}
+
+/// Opens `target` (a web address) in the default browser. Returns once the opener has started.
+pub(super) fn open(target: &str) -> std::io::Result<()> {
+    use std::process::Command;
+    // No shell on Windows: `&` in the address would end a `cmd` command.
+    let mut opener = if cfg!(target_os = "macos") {
+        Command::new("open")
+    } else if cfg!(windows) {
+        let mut c = Command::new("rundll32");
+        c.arg("url.dll,FileProtocolHandler");
+        c
+    } else {
+        Command::new("xdg-open")
+    };
+    opener.arg(target).spawn().map(drop)
+}
+
+/// Shows `file` in the file manager: selected in Finder or Explorer, or its folder on Linux and the BSDs.
+pub(super) fn reveal(file: &std::path::Path) -> std::io::Result<()> {
+    use std::process::Command;
+    #[cfg(target_os = "macos")]
+    return Command::new("open").arg("-R").arg(file).spawn().map(drop);
+    // The path quoted on its own: std would quote `/select,<path>` as one word, which Explorer misreads.
+    #[cfg(windows)]
+    return std::os::windows::process::CommandExt::raw_arg(
+        &mut Command::new("explorer"),
+        format!("/select,\"{}\"", file.display()),
+    )
+    .spawn()
+    .map(drop);
+    #[cfg(not(any(target_os = "macos", windows)))]
+    Command::new("xdg-open")
+        .arg(file.parent().unwrap_or(file))
+        .spawn()
+        .map(drop)
 }
 
 /// Starts a fresh process, since permissions take effect for a new process only. Inside a

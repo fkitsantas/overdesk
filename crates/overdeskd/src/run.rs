@@ -294,7 +294,8 @@ impl Sources {
     }
 }
 
-/// Prints `line` to stderr when `on` (`OVERDESK_DEBUG`); it is only built then.
+/// Prints `line` to stderr when `on` (`OVERDESK_DEBUG`); it is only built then. Deliberately not the
+/// log file: these lines carry every pointer move, which the log must never hold.
 fn trace(on: bool, line: impl FnOnce() -> String) {
     if on {
         eprintln!("[debug] {}", line());

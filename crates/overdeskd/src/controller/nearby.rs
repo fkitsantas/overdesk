@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use overdesk_net::discovery::{Change, Nearby};
 use overdesk_net::pairing::{Fingerprint, peer_id};
 use overdesk_proto::PeerId;
+use overdesk_proto::log::{self, short_id};
 use tokio::time::Instant;
 
 use super::model::{DeviceKind, NearbyDevice, PairedDevice};
@@ -39,10 +40,17 @@ pub fn auto_target(
 pub fn apply(found: &mut BTreeMap<PeerId, Nearby>, change: Change) {
     match change {
         Change::Found(n) => {
-            found.insert(n.id, n);
+            // A re-announcement of the same device at the same place is not news.
+            let line = format!("nearby found: {} {} at {}", short_id(&n.id), n.os.id(), n.address);
+            let (id, address) = (n.id, n.address);
+            if found.insert(id, n).is_none_or(|old| old.address != address) {
+                log::info(line);
+            }
         }
         Change::Lost(id) => {
-            found.remove(&id);
+            if found.remove(&id).is_some() {
+                log::info(format_args!("nearby lost: {}", short_id(&id)));
+            }
         }
         // Not about a device; the controller reacts to it by redialing.
         Change::NetworkChanged => {}

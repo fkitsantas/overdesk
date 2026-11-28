@@ -142,7 +142,7 @@ pub fn apply_default(store: &Path) {
             .and_then(|()| std::fs::write(marker, b""))
             .is_err()
     {
-        eprintln!("overdesk: could not record the login default");
+        overdesk_proto::log::warn("could not record the login default");
     }
 }
 

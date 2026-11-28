@@ -135,7 +135,22 @@ Builds from source update by rebuilding.
 | 8d | Architecture pass to a senior standard: typed errors and connection close reasons (a peer's text is never shown), one lock policy, every large file split by job, pairing and trust logic shared with Pro | ✅ Done |
 | 9 | **Apple TV** (Pro): a screen on the Desk; push the cursor onto it and your keyboard and mouse are its remote. The open core only carries the generic bits (remote devices in the nearby list, a PIN prompt, `Store::save_secret`) | 🧪 Built; tested against a fake TV, real-TV test pending |
 | 9b | VPNs: discovery ignores VPN tunnels and prefers the shared local network, reconnects as soon as the network changes, and a hint when a VPN blocks the local network | 🧪 Built; hand test pending ([VPN tests](docs/HAND-TESTS.md)) |
+| 9c | Bug reports a non-technical person can make: an always-on log file, and tray items **Report a bug…** and **Save diagnostics file** that save a text file (versions, OS, displays, paired devices, the newest log lines; never keystrokes, clipboard, PINs, keys or emails) to Downloads and open the support page prefilled | 🧪 Built; hand test pending ([diagnostics tests](docs/HAND-TESTS.md)) |
 | 10 | Keep connections on the local network card when a VPN routes the local network into its tunnel (binding the QUIC socket to the physical interface) | ❓ To be decided after the Windows corporate VPN test |
+
+## 🩺 Reporting a bug
+
+Choose **Report a bug…** in the menu-bar or tray menu: Overdesk saves `overdesk-diagnostics-YYYYMMDD-HHMMSS.txt` to your Downloads folder and opens the support page already filled in; attach the file. On the other computer, choose **Save diagnostics file**. The file holds versions, your OS, displays, paired and nearby devices (short id and OS), the connection state and the newest log lines, at most 512 KiB. It never holds keystrokes, pointer positions, clipboard contents, PINs, keys or email addresses.
+
+Overdesk always writes a log, rotated at 1 MiB (one old file is kept):
+
+| OS | Log file |
+|---|---|
+| macOS | `~/Library/Application Support/Overdesk/logs/overdesk.log` |
+| Windows | `%APPDATA%\Overdesk\logs\overdesk.log` |
+| Linux, FreeBSD, OpenBSD | `~/.overdesk/logs/overdesk.log` |
+
+`OVERDESK_HOME` moves the folder that holds `logs`.
 
 ## 🏗️ Architecture
 

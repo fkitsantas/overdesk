@@ -10,7 +10,7 @@ use overdesk_core::{DeskError, LayoutError, adopt};
 use overdesk_net::pairing::{Fingerprint, peer_id};
 use overdesk_net::session::{Me, PeerHello, SessionError, hello};
 use overdesk_net::transport::{CloseReason, Link, LinkRx, LinkTx, Role, SETUP_TIMEOUT};
-use overdesk_proto::{Control, Desk, DeskScreen, MAX_SCREEN_SIDE, Os, PeerId};
+use overdesk_proto::{Control, Desk, DeskScreen, MAX_SCREEN_SIDE, Os, PeerId, log};
 
 /// Why a connection could not become a running session.
 #[derive(Debug, thiserror::Error)]
@@ -104,6 +104,13 @@ pub async fn introduce(
         height,
         features,
     } = hello(link, me).await?;
+    // Version, OS, screen and features only: nothing the peer typed or copied is ever in a Hello.
+    log::info(format_args!(
+        "peer introduced: {} \"{name}\", {}, screen {width}x{height}, protocol v{}, features {features:#x}",
+        log::short_id(&peer),
+        os.id(),
+        overdesk_proto::PROTOCOL_VERSION
+    ));
     Ok(Introduced {
         id: peer,
         name,

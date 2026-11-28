@@ -244,6 +244,7 @@ async fn serve(args: Args, platform: impl Platform + Clone + Sync, me: Me) -> Re
 /// Parses arguments, arms the optional exit timer, and serves on the chosen platform.
 #[tokio::main]
 async fn main() -> ExitCode {
+    log::init(&store_dir());
     let args = match parse() {
         Ok(a) => a,
         Err(e) => {

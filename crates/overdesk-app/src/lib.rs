@@ -6,6 +6,7 @@
 #![cfg_attr(test, allow(clippy::missing_docs_in_private_items))] // test names document themselves
 mod backdrop;
 mod desk;
+mod diag;
 mod ext;
 mod form;
 mod host;
@@ -73,6 +74,29 @@ pub struct Edition {
     pub licensed_to: Option<String>,
     /// Checks and stores a key; `Ok(email)` on success, `Err` with a sentence for the user.
     pub activate: fn(&str) -> Result<String, String>,
+    /// Describes the edition for diagnostics, given how many computers are linked now.
+    pub report: fn(usize) -> EditionReport,
+}
+
+/// What a build says about itself in a bug report: asked when the report is made, so a licence that
+/// changed since start-up is reported as it is now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditionReport {
+    /// Whether Pro features are on right now.
+    pub pro: bool,
+    /// The version of the app the user runs (a build that wraps this one reports its own).
+    pub version: &'static str,
+    /// Extra lines for the diagnostics header, without the leading `# `. Never keys, tokens or emails.
+    pub lines: Vec<String>,
+}
+
+/// The open app's [`Edition::report`]: Free, at this crate's version, with no extra lines.
+pub fn free_report(_links: usize) -> EditionReport {
+    EditionReport {
+        pro: false,
+        version: env!("CARGO_PKG_VERSION"),
+        lines: Vec::new(),
+    }
 }
 
 /// The edition chosen by the caller of [`run_with`]; absent for Free.
@@ -98,6 +122,15 @@ pub fn run_with(spawn: Spawn, edition: Edition, extension: Option<Arc<dyn Extens
 /// Opens the window: Inter as the default font, the brand theme, and the controller's
 /// state as a subscription. `spawn` starts the controller, so another build can bring its own.
 pub fn run(spawn: Spawn) -> iced::Result {
+    overdesk_proto::log::init(&store_dir());
+    let report = EDITION.get().map_or_else(|| free_report(0), |e| (e.report)(0));
+    overdesk_proto::log::info(format_args!(
+        "Overdesk {} ({}) on {}, {}",
+        report.version,
+        if report.pro { "Pro" } else { "Free" },
+        overdeskd::os_version(),
+        std::env::consts::ARCH
+    ));
     let _ = SPAWN.set(spawn);
     if let Some(extension) = EXTENSION.get() {
         let (host, requests) = Host::channel();
@@ -282,6 +315,8 @@ enum Message {
     Retry,
     /// Leave the app (from the failed screen, where there is no tray menu to use).
     Quit,
+    /// A diagnostics file was saved (or could not be) for a bug report or on request.
+    Diagnosed(Result<diag::Saved, String>),
     /// The preview screenshot is ready to save.
     #[cfg(feature = "preview")]
     Shot(iced::window::Screenshot),
@@ -462,6 +497,7 @@ impl App {
             | Message::Tray(_)
             | Message::Host(_)
             | Message::ExtensionButton
+            | Message::Diagnosed(_)
             | Message::ToggleLogin) => return self.apply_host(m),
         }
         Task::none()

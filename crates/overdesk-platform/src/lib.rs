@@ -9,7 +9,10 @@ pub mod input;
 pub mod linux;
 pub mod mac;
 pub mod text;
+mod version;
 pub mod win;
+
+pub use version::os_version;
 
 /// A running clipboard-change watcher; dropping it stops the watcher thread.
 pub struct ClipboardWatch(Option<Box<dyn FnOnce() + Send>>);

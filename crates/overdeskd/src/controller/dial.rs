@@ -12,6 +12,7 @@ use overdesk_net::session::{Me, SessionError};
 use overdesk_net::sync::Relock;
 use overdesk_net::transport::{CloseReason, Link, NetError};
 use overdesk_proto::PeerId;
+use overdesk_proto::log::{self, short_id};
 use tokio::time::Instant;
 
 use super::model::{DeviceKind, PeerView, Phase, ScreenView, Side};
@@ -65,8 +66,18 @@ fn turned_away(why: CloseReason) -> &'static str {
 
 /// Logs a failed dial once, where it is handled, and returns what the user reads.
 fn dial_failed(e: &NetError) -> String {
-    eprintln!("overdesk: connection failed: {e}");
+    log::warn(format_args!("connection failed: {e}"));
     friendly(e).to_owned()
+}
+
+/// The screens of `desk` as `WxH at x,y` each: the layout, which says nothing of what is on them.
+fn desk_text(desk: &overdesk_proto::Desk) -> String {
+    let screens: Vec<String> = desk
+        .screens
+        .iter()
+        .map(|s| format!("{}x{} at {},{}", s.w, s.h, s.x, s.y))
+        .collect();
+    screens.join("; ")
 }
 
 /// One connection attempt, from a link to the end of its session. All state writes are
@@ -107,6 +118,10 @@ impl<P: Platform + Clone + Sync> Dial<P> {
     /// Reports a failed dial: an error screen, or for an automatic one a quiet retreat that
     /// leaves the peer alone for `wait`.
     fn fail(&self, msg: String, wait: Duration) {
+        // An automatic retry every few seconds would fill the log; its raw error is logged once already.
+        if self.auto.is_none() {
+            log::info(format_args!("attempt failed: {msg}"));
+        }
         match &self.auto {
             None => self.error(msg),
             Some(a) => {
@@ -269,6 +284,11 @@ impl<P: Platform + Clone + Sync> Dial<P> {
         }
         let peer_id = s.peer;
         let peer = s.peer_name.clone();
+        log::info(format_args!(
+            "session with {} started; desk: {}",
+            short_id(&peer_id),
+            desk_text(&s.desk)
+        ));
         self.set(
             Phase::Connected {
                 peers: vec![PeerView {
@@ -316,6 +336,7 @@ impl<P: Platform + Clone + Sync> Dial<P> {
         if shared.generation.load(Ordering::SeqCst) == generation {
             *shared.closer.relock() = None;
         }
+        log::info(format_args!("session with {} ended: {ended:?}", short_id(&peer_id)));
         match ended {
             Ended::PeerLeft => {
                 shared.left.relock().insert(peer_id);

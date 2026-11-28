@@ -73,6 +73,18 @@ pub enum Os {
     Android,
 }
 
+impl Os {
+    /// The lower-case name logs, bug reports and discovery use: `macos`, `windows`, `linux`, `android`.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Os::MacOs => "macos",
+            Os::Windows => "windows",
+            Os::Linux => "linux",
+            Os::Android => "android",
+        }
+    }
+}
+
 /// Pointer button, independent of how the local OS numbers its buttons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Button {

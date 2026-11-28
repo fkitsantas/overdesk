@@ -22,6 +22,7 @@ use overdesk_net::store::Store;
 use overdesk_net::sync::Relock;
 use overdesk_net::transport::{CloseReason, Link, Node};
 use overdesk_proto::PeerId;
+use overdesk_proto::log;
 use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -59,6 +60,11 @@ pub async fn spawn<P: Platform + Clone + Sync>(
     .await
     .map_err(|e| StartError::Store(e.to_string()))??;
     let node = Node::bind(&identity, config.listen).map_err(|e| StartError::Bind(e.to_string()))?;
+    log::info(format_args!(
+        "controller listening on {}; discovery {}",
+        node.local_addr().map_or_else(|e| e.to_string(), |a| a.to_string()),
+        if config.discovery { "on" } else { "off" }
+    ));
     let (state, state_rx) = watch::channel(AppState {
         address: node.local_addr().ok(),
         ..AppState::new(config.me.name.clone(), config.me.os)
@@ -95,6 +101,7 @@ pub async fn spawn<P: Platform + Clone + Sync>(
         std::thread::spawn(move || {
             while let Ok(change) = changes.recv() {
                 if change == Change::NetworkChanged {
+                    log::info(format_args!("network changed; VPN active: {}", (shared.vpn)()));
                     shared.network.notify_one();
                     continue;
                 }
@@ -110,9 +117,12 @@ pub async fn spawn<P: Platform + Clone + Sync>(
         Ok((advertiser, browser))
     });
     let discovery = match started {
-        Some(Ok(d)) => Some(d),
+        Some(Ok(d)) => {
+            log::info(format_args!("discovery started; VPN active: {}", (shared.vpn)()));
+            Some(d)
+        }
         Some(Err(e)) => {
-            eprintln!("overdesk: discovery unavailable: {e}");
+            log::warn(format_args!("discovery unavailable: {e}"));
             shared.notify("Couldn't look for other computers on your network. You can still type an address.".into());
             None
         }
@@ -229,9 +239,11 @@ impl<P: Platform + Clone + Sync> Supervisor<P> {
             Command::DisconnectPeer(p) if !matches!(&shared.state.borrow().phase, Phase::Connected { peers, .. } if peers.iter().any(|v| v.id == p)) =>
                 {}
             Command::Disconnect | Command::DisconnectPeer(_) => {
+                log::info("disconnect requested by the user");
                 disconnect(shared, &mut self.active, &mut self.suppressed, Farewell::Leave);
             }
             Command::Forget(peer) => {
+                log::info(format_args!("forgetting {}", log::short_id(&peer)));
                 let ends = forgetting_ends(&shared.state.borrow().phase, self.busy(), self.aimed, peer);
                 // First, so every session that has not published yet is stale, even one mid-handshake.
                 shared.unpair(peer);
@@ -253,6 +265,7 @@ impl<P: Platform + Clone + Sync> Supervisor<P> {
         }
         // Show the attempt right away, so a stalled inbound setup is not invisible.
         self.aimed = None;
+        log::info(format_args!("incoming connection from {}", link.remote_address().ip()));
         let generation = self.shared.begin(Phase::Connecting {
             address: link.remote_address(),
         });
@@ -383,6 +396,10 @@ fn dial<P: Platform + Clone + Sync>(
     expect: Option<PeerId>,
     auto: Option<Auto>,
 ) -> JoinHandle<()> {
+    log::info(format_args!(
+        "dialing {address} ({})",
+        if auto.is_some() { "automatic" } else { "manual" }
+    ));
     let generation = shared.begin(Phase::Connecting { address });
     let (node, task_shared) = (node.clone(), shared.clone());
     spawn_session(shared, generation, async move {
@@ -406,7 +423,7 @@ fn spawn_session<P: Platform + Clone + Sync>(
         if let Err(e) = (&mut inner.0).await
             && e.is_panic()
         {
-            eprintln!("overdesk: session task panicked: {e}");
+            log::warn(format_args!("session task panicked: {e}"));
             shared.set(
                 generation,
                 Phase::Error("Something went wrong inside Overdesk. Please connect again.".into()),

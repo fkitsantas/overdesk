@@ -2,6 +2,7 @@
 //! The Free app: the library's window around the open controller.
 
 fn main() -> iced::Result {
+    overdesk_proto::log::init(&overdeskd::store_dir());
     // Before any window exists: Windows refuses the change afterwards.
     #[cfg(windows)]
     if let Some(w) = overdesk_platform::win::ffi::ensure_dpi_aware() {

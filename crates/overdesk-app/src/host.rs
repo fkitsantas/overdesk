@@ -3,10 +3,12 @@
 //! and what the build's [`Extension`](crate::Extension) asks of the app.
 
 use iced::Task;
-use overdeskd::controller::Command;
+use overdeskd::controller::{Command, Phase};
 
 use super::ext::Request;
-use super::{App, Message, SHUTDOWN_GRACE, Screen, background, login, tray};
+use super::{
+    App, EDITION, EditionReport, Message, SHUTDOWN_GRACE, Screen, background, diag, free_report, login, store_dir, tray,
+};
 
 impl App {
     /// Applies the messages about the app's place in the system: the tray, the login item,
@@ -45,6 +47,19 @@ impl App {
                 Task::none()
             }
             Message::Host(request) => self.host_request(request),
+            Message::Tray(tray::Action::Report) => self.diagnose(true),
+            Message::Tray(tray::Action::SaveDiagnostics) => self.diagnose(false),
+            Message::Diagnosed(result) => {
+                self.notice = Some(match result {
+                    Ok(saved) => saved.notice(),
+                    Err(e) => {
+                        overdesk_proto::log::warn(format_args!("diagnostics not saved: {e}"));
+                        "Couldn't save the diagnostics file. Check that Downloads is writable, then try again.".into()
+                    }
+                });
+                // The notice is in the window, which may be hidden in the tray.
+                Task::done(Message::Tray(tray::Action::Show))
+            }
             Message::ToggleLogin | Message::Tray(tray::Action::ToggleLogin) => {
                 self.toggle_login();
                 Task::none()
@@ -63,6 +78,37 @@ impl App {
             // `App::apply` sends here only what it matches above.
             _ => Task::none(),
         }
+    }
+
+    /// Saves the diagnostics file off the UI thread, then opens the support page (`report`) or the
+    /// file manager, and reports back as [`Message::Diagnosed`].
+    fn diagnose(&self, report: bool) -> Task<Message> {
+        let (state, links) = match &self.screen {
+            Screen::Running { state, .. } => (
+                Some(state),
+                match &state.phase {
+                    Phase::Connected { peers, .. } => peers.len(),
+                    _ => 0,
+                },
+            ),
+            _ => (None, 0),
+        };
+        let edition = self.edition_report(links);
+        let facts = diag::facts(state, edition);
+        let store = store_dir();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || diag::run(facts, &store, report))
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()))
+            },
+            Message::Diagnosed,
+        )
+    }
+
+    /// What the build says about its edition now, `links` computers being linked.
+    fn edition_report(&self, links: usize) -> EditionReport {
+        EDITION.get().map_or_else(|| free_report(links), |e| (e.report)(links))
     }
 
     /// Creates the tray icon, or copes without it.
@@ -182,6 +228,29 @@ mod tests {
         let (mut app, _) = app();
         let _ = app.apply(Message::Host(Request::Notice("Hello".into())));
         assert_eq!(app.notice.as_deref(), Some("Hello"));
+    }
+
+    #[test]
+    fn a_saved_file_is_announced_and_a_failure_hides_the_raw_error() {
+        let (mut app, _) = app();
+        let saved = diag::Saved {
+            name: "d.txt".into(),
+            path: "/Users/x/Downloads/d.txt".into(),
+            in_downloads: true,
+            opened: true,
+            url: None,
+        };
+        let _ = app.apply(Message::Diagnosed(Ok(saved)));
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Saved d.txt to Downloads. Attach it to your report.")
+        );
+        let _ = app.apply(Message::Diagnosed(Err("os error 13 at /secret/path".into())));
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("Couldn't save") && !n.contains("secret"))
+        );
     }
 
     #[test]

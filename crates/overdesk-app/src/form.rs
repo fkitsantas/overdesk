@@ -79,6 +79,7 @@ mod tests {
         let edition = |activate: fn(&str) -> Result<String, String>| Edition {
             licensed_to: None,
             activate,
+            report: crate::free_report,
         };
         let mut form = Activation {
             key: " k ".into(),

@@ -131,6 +131,7 @@ pub fn edition(which: &str) -> Option<crate::Edition> {
     matches!(which, "licence" | "licence-error" | "licensed").then(|| crate::Edition {
         licensed_to: (which == "licensed").then(|| "ada@example.org".into()),
         activate: |_| Err("That key isn't valid. Check it and try again.".into()),
+        report: crate::free_report,
     })
 }
 

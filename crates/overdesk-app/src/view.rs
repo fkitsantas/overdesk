@@ -50,6 +50,7 @@ impl App {
                     big("Quit").style(style::secondary).on_press(Message::Quit),
                 ]
                 .spacing(10),
+                help_buttons(),
             ]
             .spacing(10)
             .align_x(Alignment::Center)
@@ -345,6 +346,7 @@ impl App {
         ]
         .spacing(10)
         .align_y(Alignment::Center);
+        settings = settings.push(help_buttons());
         if let Some(e) = &self.login_error {
             settings = settings.push(text(e.as_str()).size(13).style(muted));
         }
@@ -576,6 +578,17 @@ fn os_word(os: Os) -> &'static str {
 /// A screen title: large and semibold.
 fn title<'a>(s: impl text::IntoFragment<'a>) -> iced::widget::Text<'a> {
     text(s).size(29).font(bold()).align_x(Alignment::Center)
+}
+
+/// "Report a bug…" and "Save diagnostics file": the tray's items, for desktops with no tray.
+fn help_buttons<'a>() -> Element<'a, Message> {
+    let action = |label: &'static str, a| small(label).style(style::secondary).on_press(Message::Tray(a));
+    row![
+        action("Report a bug…", crate::tray::Action::Report),
+        action("Save diagnostics file", crate::tray::Action::SaveDiagnostics),
+    ]
+    .spacing(8)
+    .into()
 }
 
 /// A button with its label at the page's main size; the caller adds style and action.

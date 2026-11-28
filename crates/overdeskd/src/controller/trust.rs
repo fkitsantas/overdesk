@@ -18,7 +18,7 @@ use overdesk_net::session::{SessionError, pair};
 use overdesk_net::store::Store;
 use overdesk_net::sync::Relock;
 use overdesk_net::transport::{CloseReason, Link, NetError};
-use overdesk_proto::PeerId;
+use overdesk_proto::{PeerId, log};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
@@ -334,6 +334,8 @@ pub async fn pair_with_user(
         return Err(Unpaired::Refused);
     };
     let who = link.remote_address().ip().to_string();
+    // The code on the screens is never logged: it is what proves both people see the same device.
+    log::info(format_args!("pairing started with {who} ({direction:?})"));
     let confirm = async |code: u32| {
         let rx = window.prompt(code);
         show(Phase::Pairing {
@@ -346,6 +348,14 @@ pub async fn pair_with_user(
     if inbound {
         window.record(paired.is_ok());
     }
+    log::info(format_args!(
+        "pairing {}",
+        match &paired {
+            Ok(_) => "succeeded".to_owned(),
+            Err(SessionError::Declined) => "declined".to_owned(),
+            Err(e) => format!("failed: {e}"),
+        }
+    ));
     match paired {
         Ok(fp) => {
             on_paired();

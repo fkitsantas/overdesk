@@ -30,6 +30,10 @@ const ICON: &[u8] = include_bytes!("../../../assets/brand/tray-win-32.png");
 const SHOW: &str = "show";
 /// Menu item id of "Disconnect".
 const DISCONNECT: &str = "disconnect";
+/// Menu item id of "Report a bug…".
+const REPORT: &str = "report";
+/// Menu item id of "Save diagnostics file".
+const DIAGNOSTICS: &str = "diagnostics";
 /// Menu item id of "Open at login".
 const LOGIN: &str = "login";
 /// Menu item id of "Quit Overdesk".
@@ -44,6 +48,10 @@ pub enum Action {
     Disconnect,
     /// An item the build's extension added, by its id.
     Menu(String),
+    /// Save the diagnostics file and open the support page.
+    Report,
+    /// Save the diagnostics file and show it in the file manager.
+    SaveDiagnostics,
     /// Flip "Open at login".
     ToggleLogin,
     /// Disconnect if needed and exit.
@@ -81,6 +89,10 @@ impl Tray {
             .iter()
             .map(|i| MenuItem::with_id(&i.id, &i.label, true, None))
             .collect();
+        let help = [
+            MenuItem::with_id(REPORT, "Report a bug…", true, None),
+            MenuItem::with_id(DIAGNOSTICS, "Save diagnostics file", true, None),
+        ];
         let (show, quit) = (
             MenuItem::with_id(SHOW, "Show Overdesk", true, None),
             MenuItem::with_id(QUIT, "Quit Overdesk", true, None),
@@ -88,6 +100,7 @@ impl Tray {
         let separator = PredefinedMenuItem::separator();
         let mut items: Vec<&dyn IsMenuItem> = vec![&status, &separator, &show, &disconnect, &separator];
         items.extend(extra.iter().map(|i| i as &dyn IsMenuItem));
+        items.extend(help.iter().map(|i| i as &dyn IsMenuItem));
         items.extend([&login as &dyn IsMenuItem, &quit]);
         let menu = Menu::with_items(&items).map_err(|e| e.to_string())?;
         let builder = TrayIconBuilder::new()
@@ -211,6 +224,8 @@ pub fn actions() -> impl iced::futures::Stream<Item = Action> {
             let action = match event.id.as_ref() {
                 SHOW => Action::Show,
                 DISCONNECT => Action::Disconnect,
+                REPORT => Action::Report,
+                DIAGNOSTICS => Action::SaveDiagnostics,
                 LOGIN => Action::ToggleLogin,
                 QUIT => Action::Quit,
                 other => Action::Menu(other.to_owned()),
