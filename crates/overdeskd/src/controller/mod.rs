@@ -270,9 +270,20 @@ async fn control<P: Platform + Clone + Sync>(
     let (claims_tx, mut claims) = mpsc::unbounded_channel::<Link>();
     let mut tick = tokio::time::interval(AUTO_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The redial tick runs only while not connected: a connected device has nothing to redial, so
+    // it sleeps through a whole session instead of waking every two seconds. Any state change
+    // wakes the loop to re-read the phase, which re-arms the tick the moment the session ends
+    // (the missed ticks are delayed, not burst, so it fires once at once).
+    let mut phase = ctl.shared.state.subscribe();
     loop {
+        let connected = matches!(phase.borrow_and_update().phase, Phase::Connected { .. });
+        if connected {
+            // As `auto_dial` used to find out at a tick: the user wants these two together.
+            ctl.suppressed = false;
+        }
         tokio::select! {
-            _ = tick.tick() => ctl.auto_dial(my_id),
+            _ = tick.tick(), if !connected => ctl.auto_dial(my_id),
+            Ok(()) = phase.changed() => {}
             cmd = commands.recv() => match cmd {
                 None => break,
                 Some(cmd) => ctl.command(cmd),

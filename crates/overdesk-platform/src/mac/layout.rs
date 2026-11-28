@@ -282,6 +282,10 @@ impl MacLayout {
     /// thread (this call hops there and waits, for up to a second, when made elsewhere; a
     /// process that never services its main queue gets a lookup with no layout, which answers
     /// "no character"); the current layout is read lazily from the main-queue cache.
+    ///
+    /// A named source blocks the caller for that wait, so call it from a plain thread or
+    /// `spawn_blocking`, never from an async worker. No code in the workspace (nor in Pro)
+    /// reaches it with a named source outside tests; [`Source::Current`] never blocks.
     pub fn new(source: Source) -> Self {
         match source {
             Source::Current => Self::default(),
