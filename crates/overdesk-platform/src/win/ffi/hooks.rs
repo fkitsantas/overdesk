@@ -24,17 +24,19 @@ use windows_sys::Win32::UI::Input::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DefWindowProcW, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_UP, MSLLHOOKSTRUCT,
-    SPI_GETMOUSE, SPI_GETMOUSESPEED, SetTimer, SetWindowsHookExW, SystemParametersInfoW, UnhookWindowsHookEx,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_DISPLAYCHANGE, WM_INPUT, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-    WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER, WM_XBUTTONDOWN,
-    WM_XBUTTONUP,
+    PostThreadMessageW, SPI_GETMOUSE, SPI_GETMOUSESPEED, SetTimer, SetWindowsHookExW, SystemParametersInfoW,
+    UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_DISPLAYCHANGE, WM_INPUT, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER,
+    WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
 
 use super::display::{VIRTUAL, cursor_local, ensure_dpi_aware};
 use super::window::{message_window, pump, quit_thread};
 use super::{Captured, INJECTED_TAG, WinError, XBUTTON2, wide};
 use crate::input::{CAPS_CODE, EscapeChord, Held, LocalDowns, Sink};
-use crate::win::events::{Ballistics, CapsTracker, FAKE_LCTRL_SCAN, hook_is_dead, passes_unforwarded_key};
+use crate::win::events::{
+    Ballistics, CapsTracker, FAKE_LCTRL_SCAN, hook_is_dead, passes_unforwarded_key, raw_button_edges,
+};
 use crate::win::keymap::scan_to_code;
 
 /// Raw Input `usFlags`: absolute pointing devices (pens, RDP) have no deltas.
@@ -108,6 +110,24 @@ impl HookClock {
 }
 
 thread_local! {
+    /// Whether the mouse hook is installed now (it is only while swallowing). While it is not,
+    /// the button edges come from Raw Input instead; see [`raw_input_message`]. Capture thread only.
+    static MOUSE_HOOK_ON: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The message that tells the capture thread the swallow flag changed, so it installs or removes
+/// the mouse hook. It carries nothing: the thread reads the flag itself, so a burst of changes
+/// cannot be applied out of order.
+const WM_SWALLOW_CHANGED: u32 = WM_APP;
+
+/// Asks the capture thread `thread` (a Win32 thread id) to bring the mouse hook in line with the
+/// swallow flag. A failed post is harmless: the periodic check does the same within a second.
+fn wake(thread: u32) {
+    // SAFETY: posting a thread message with no pointer in it to a thread id is always allowed.
+    unsafe { PostThreadMessageW(thread, WM_SWALLOW_CHANGED, 0, 0) };
+}
+
+thread_local! {
     /// The keyboard hook's clock.
     static KB_CLOCK: HookClock = HookClock::new();
     /// The mouse hook's clock.
@@ -120,6 +140,8 @@ fn send(ctx: &HookCtx, c: Captured) {
     // Nobody listening any more (engine gone): never keep swallowing input.
     if ctx.tx.send(c).is_err() {
         ctx.swallow.store(false, Ordering::Relaxed);
+        // SAFETY: a plain query.
+        wake(unsafe { GetCurrentThreadId() });
     }
 }
 
@@ -129,6 +151,8 @@ fn edge(ctx: &mut HookCtx, held: Held, down: bool) -> bool {
         && ctx.chord.key(code, down)
     {
         ctx.swallow.store(false, Ordering::Relaxed);
+        // SAFETY: a plain query.
+        wake(unsafe { GetCurrentThreadId() });
         send(ctx, Captured::Escape);
     }
     let swallowing = ctx.swallow.load(Ordering::Relaxed);
@@ -371,6 +395,21 @@ unsafe fn raw_input_message(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             // SAFETY: dwType is RIM_TYPEMOUSE, so the mouse arm of the union is active.
             let mouse = unsafe { raw.data.mouse };
             let (dx, dy) = (mouse.lLastX, mouse.lLastY);
+            // While swallowing the low-level hook reports the buttons; before it is installed
+            // (and after it is removed) they come from here, or a drag could cross an edge.
+            if !MOUSE_HOOK_ON.get() {
+                // SAFETY: the button arm of the union is the one Raw Input fills in.
+                let flags = unsafe { mouse.Anonymous.Anonymous.usButtonFlags };
+                CTX.with_borrow_mut(|c| {
+                    if let Some(ctx) = c {
+                        for (button, pressed) in raw_button_edges(flags) {
+                            send(ctx, Captured::Button { button, pressed });
+                            // Reaches local apps, as the hook's `edge` would record it.
+                            ctx.local.deliver_locally(Held::Button(button), pressed, false);
+                        }
+                    }
+                });
+            }
             if mouse.usFlags & MOUSE_MOVE_ABSOLUTE == 0 && (dx, dy) != (0, 0) {
                 let (x, y) = cursor_local();
                 CTX.with_borrow_mut(|c| {
@@ -429,8 +468,17 @@ impl Capture {
     }
 
     /// While on, input is consumed instead of reaching local apps, and the cursor stays put.
+    ///
+    /// The mouse hook exists only while swallowing: turning it on posts a message and the hook
+    /// is installed a moment later, on the capture thread (a low-level hook must be installed
+    /// by the thread whose message loop runs it). Until then a first click or move can still
+    /// reach this PC's apps; turning it off removes the hook the same way.
     pub fn set_swallow(&self, on: bool) {
         self.swallow.store(on, Ordering::Relaxed);
+        // A thread that ended has an id Windows may give to another one: post to a live one only.
+        if self.thread.as_ref().is_some_and(|t| !t.is_finished()) {
+            wake(self.thread_id);
+        }
     }
 }
 
@@ -552,13 +600,28 @@ fn recheck(
     }
 }
 
+/// Brings the mouse hook in line with `swallowing`: installed (or checked, and reinstalled if
+/// Windows removed it) while swallowing, removed otherwise, and [`MOUSE_HOOK_ON`] told which.
+/// Capture thread only. Moves and buttons that arrive before the install reach local apps: a
+/// short window when swallowing starts, which Raw Input still reports to the engine.
+fn sync_mouse_hook(mouse: &mut HookGuard, swallowing: bool) {
+    if swallowing {
+        recheck(mouse, WH_MOUSE_LL, mouse_hook, &MOUSE_CLOCK);
+    } else {
+        drop(std::mem::replace(mouse, HookGuard(null_mut())));
+    }
+    MOUSE_HOOK_ON.set(!mouse.0.is_null());
+}
+
 /// Body of the capture thread: installs [`CTX`], creates the Raw Input window,
-/// registers the mouse and keyboard for Raw Input and installs both low-level hooks, reports its
-/// thread id (or the first failure) on `ready`, then pumps messages until `WM_QUIT`.
+/// registers the mouse and keyboard for Raw Input and installs the keyboard hook (the mouse hook
+/// comes and goes with swallowing, see [`sync_mouse_hook`]), reports its thread id (or the first
+/// failure) on `ready`, then pumps messages until `WM_QUIT`.
 /// Low-level hooks only run while their installing thread pumps messages. Whatever way it
 /// returns, the hooks are removed, the window destroyed and the context cleared.
 fn run_capture(tx: Sink, swallow: Arc<AtomicBool>, ready: Sender<Result<u32, WinError>>) {
     let _ctx = CtxGuard;
+    let want_mouse_hook = swallow.clone();
     CTX.with_borrow_mut(|c| {
         *c = Some(HookCtx {
             tx,
@@ -602,8 +665,8 @@ fn run_capture(tx: Sink, swallow: Arc<AtomicBool>, ready: Sender<Result<u32, Win
     }
     let (mut kb, mut mouse) = (HookGuard(null_mut()), HookGuard(null_mut()));
     reinstall(&mut kb, WH_KEYBOARD_LL, keyboard_hook, &KB_CLOCK);
-    reinstall(&mut mouse, WH_MOUSE_LL, mouse_hook, &MOUSE_CLOCK);
-    if kb.0.is_null() || mouse.0.is_null() {
+    // The mouse hook waits for the first swallow; see `sync_mouse_hook`.
+    if kb.0.is_null() {
         let _ = ready.send(Err(WinError::HookFailed));
         return;
     }
@@ -616,9 +679,12 @@ fn run_capture(tx: Sink, swallow: Arc<AtomicBool>, ready: Sender<Result<u32, Win
         let check = msg.message == WM_TIMER && msg.wParam == CHECK_TIMER;
         if check {
             recheck(&mut kb, WH_KEYBOARD_LL, keyboard_hook, &KB_CLOCK);
-            recheck(&mut mouse, WH_MOUSE_LL, mouse_hook, &MOUSE_CLOCK);
         }
-        check
+        let changed = msg.message == WM_SWALLOW_CHANGED && msg.hwnd.is_null();
+        if check || changed {
+            sync_mouse_hook(&mut mouse, want_mouse_hook.load(Ordering::Relaxed));
+        }
+        check || changed
     });
     // `mouse`, `kb`, `window` and `_ctx` drop here, in that order (reverse of declaration).
 }

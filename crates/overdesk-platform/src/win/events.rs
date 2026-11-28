@@ -12,6 +12,24 @@ pub fn passes_unforwarded_key(down: bool, swallowing: bool) -> bool {
     !down || !swallowing
 }
 
+/// The button edges in a Raw Input mouse report's `usButtonFlags` (`RI_MOUSE_*_DOWN` and
+/// `_UP`: the bit pairs `0x1`/`0x2` left, `0x4`/`0x8` right, `0x10`/`0x20` middle, `0x40`/`0x80`
+/// button 4 (Back) and `0x100`/`0x200` button 5 (Forward)), as `(button, pressed)` in the order
+/// of those bits. The wheel flags are not buttons and are left out.
+pub fn raw_button_edges(flags: u16) -> impl Iterator<Item = (overdesk_proto::Button, bool)> {
+    use overdesk_proto::Button::{Back, Forward, Left, Middle, Right};
+    [Left, Right, Middle, Back, Forward]
+        .into_iter()
+        .enumerate()
+        .flat_map(move |(i, b)| {
+            [
+                (b, flags >> (2 * i) & 1 != 0, true),
+                (b, flags >> (2 * i + 1) & 1 != 0, false),
+            ]
+        })
+        .filter_map(|(b, set, down)| set.then_some((b, down)))
+}
+
 /// Follows the Caps Lock toggle from the keys that actually reached the OS, because the OS
 /// cannot be asked from a thread without a message queue: `GetKeyState` there is a stale
 /// snapshot. Seed it from a live read on the capture thread, then feed every Caps Lock edge.
@@ -147,6 +165,21 @@ pub fn hook_is_dead(last_hook: std::time::Instant, last_raw: Option<std::time::I
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_report_flags_become_button_edges_in_bit_order() {
+        use overdesk_proto::Button::{Back, Forward, Left, Middle, Right};
+        let edges = |f| raw_button_edges(f).collect::<Vec<_>>();
+        assert_eq!(edges(0), vec![]);
+        assert_eq!(edges(0x1), vec![(Left, true)]);
+        assert_eq!(edges(0x2), vec![(Left, false)]);
+        assert_eq!(edges(0x4 | 0x8), vec![(Right, true), (Right, false)]);
+        assert_eq!(edges(0x10), vec![(Middle, true)]);
+        assert_eq!(edges(0x80), vec![(Back, false)]);
+        assert_eq!(edges(0x100), vec![(Forward, true)]);
+        assert_eq!(edges(0x200), vec![(Forward, false)]);
+        assert_eq!(edges(0x400 | 0x800), vec![], "wheel flags are not buttons");
+    }
 
     #[test]
     fn hook_dead_only_when_raw_input_outruns_it() {
