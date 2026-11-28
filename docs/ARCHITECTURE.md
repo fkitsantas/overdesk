@@ -66,7 +66,7 @@ Events describe *intent*, not raw OS events. Each OS adapter translates to and f
 | Keys | USB HID usage IDs. Command/Control swap between Mac and PC peers. |
 | Pointer | Absolute position, in the focused screen's logical, DPI-independent coordinates |
 | Scroll | Pixel or ¹⁄₁₂₀-notch deltas plus a phase (`Began`, `Changed`, `Ended`, `Momentum…`), so macOS inertia and rubber-banding survive the trip |
-| Gestures | Magnify, rotate and smart zoom, with phases, delivered natively on macOS |
+| Gestures | Magnify, rotate and smart zoom, with phases, delivered natively on macOS. Two-finger double-tap and two-finger swipe are sent once, by name (what the fingers did), to a peer that announced `FEATURE_GESTURES`; the receiver maps each to a shortcut of its own (a picker on Windows and Linux/BSD, the Mac's own Mission Control and Space shortcuts on a Mac). A Mac announces `FEATURE_MAGIC_MOUSE` and `FEATURE_TRACKPAD` in `Hello` when it has them, so the receiver can show the picker |
 
 Apple fidelity lives in the macOS adapter. The wire format never throws that information away.
 

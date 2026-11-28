@@ -452,6 +452,7 @@ mod tests {
                 id,
                 name: "peer".into(),
                 os: Os::Linux,
+                features: 0,
                 kind: DeviceKind::Computer,
                 label: None,
             }],

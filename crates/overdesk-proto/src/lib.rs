@@ -27,6 +27,14 @@ pub const FEATURE_KEY_TEXT: u64 = 1;
 /// [`Control::Hello`] feature bit: the peer takes [`Control::Lease`] (an opaque signed statement
 /// the official app exchanges). A sender must not send `Lease` to a peer that did not announce it.
 pub const FEATURE_LEASE: u64 = 2;
+/// [`Control::Hello`] feature bit: the peer maps [`Gesture::TwoFingerDoubleTap`] and
+/// [`Gesture::TwoFingerSwipe`] to actions of its own (a Windows PC). A sender must not send them to a
+/// peer that did not announce it.
+pub const FEATURE_GESTURES: u64 = 4;
+/// [`Control::Hello`] feature bit: the sender has an Apple Magic Mouse, so its gestures can arrive.
+pub const FEATURE_MAGIC_MOUSE: u64 = 8;
+/// [`Control::Hello`] feature bit: the sender has a trackpad (built in or Magic Trackpad).
+pub const FEATURE_TRACKPAD: u64 = 16;
 /// Most bytes a [`Control::Lease`] may carry; larger is rejected on both encode and decode.
 pub const MAX_LEASE_LEN: usize = 1024;
 /// Frames above this are rejected before allocating, so a peer cannot exhaust memory.
@@ -153,8 +161,18 @@ pub enum Gesture {
         /// Rotation change since the previous event, in thousandths of a degree.
         millideg: i32,
     },
-    /// Two-finger double tap.
+    /// Smart zoom: a double tap (one finger on a Magic Mouse, two on a trackpad).
     SmartZoom,
+    /// Two fingers double-tapped a Magic Mouse (macOS: Mission Control). Sent once, with
+    /// [`Phase::None`]; the receiver decides what it does. Only to a peer with [`FEATURE_GESTURES`].
+    TwoFingerDoubleTap,
+    /// Two (or three, or four) fingers swiped sideways and the swipe committed (macOS: switch
+    /// Space). Sent once, with [`Phase::None`]; the receiver decides what it does. Only to a
+    /// peer with [`FEATURE_GESTURES`].
+    TwoFingerSwipe {
+        /// `true` if the fingers moved to the right.
+        right: bool,
+    },
 }
 
 /// Reliable, ordered control-lane message.
@@ -637,6 +655,14 @@ mod tests {
                 gesture: Gesture::SmartZoom,
                 phase: Phase::None,
             },
+            Control::Gesture {
+                gesture: Gesture::TwoFingerDoubleTap,
+                phase: Phase::None,
+            },
+            Control::Gesture {
+                gesture: Gesture::TwoFingerSwipe { right: true },
+                phase: Phase::None,
+            },
             Control::Key {
                 code: 0x04,
                 pressed: false,
@@ -723,6 +749,25 @@ mod tests {
             [0, 0, 0, 4, 11, 4, 1, 97]
         );
         assert_eq!(enc(&Control::Lease(vec![1, 2, 200])), [0, 0, 0, 5, 12, 3, 1, 2, 200]);
+    }
+
+    #[test]
+    fn the_neutral_gestures_follow_the_old_ones_on_the_wire() {
+        // Frame: 4-byte length, Control::Gesture (4), the gesture's index, its fields, the phase.
+        let enc = |g| {
+            encode_frame(&Control::Gesture {
+                gesture: g,
+                phase: Phase::None,
+            })
+            .unwrap()[4..]
+                .to_vec()
+        };
+        // Old peers number SmartZoom 2; the new variants must not move any old index.
+        assert_eq!(enc(Gesture::SmartZoom), [4, 2, 0]);
+        assert_eq!(enc(Gesture::TwoFingerDoubleTap), [4, 3, 0]);
+        assert_eq!(enc(Gesture::TwoFingerSwipe { right: true }), [4, 4, 1, 0]);
+        assert_eq!(enc(Gesture::TwoFingerSwipe { right: false }), [4, 4, 0, 0]);
+        assert_eq!((FEATURE_GESTURES, FEATURE_MAGIC_MOUSE, FEATURE_TRACKPAD), (4, 8, 16));
     }
 
     #[test]

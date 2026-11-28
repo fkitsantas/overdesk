@@ -90,6 +90,7 @@ async fn pair_connect_and_lose_a_peer() {
                 id: sa.desk.iter().find(|d| !d.me).unwrap().id,
                 name: "pc".into(),
                 os: Os::Windows,
+                features: overdeskd::native::input_features(), // both peers announce what this host has
                 kind: DeviceKind::Computer,
                 label: None,
             }],

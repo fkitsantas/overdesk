@@ -13,7 +13,7 @@ use overdesk_proto::{Button, Gesture, Phase, ScrollUnit};
 
 use super::display::{DisplayWatch, desktop_bounds};
 use super::{INJECTED_TAG, MacError, permissions};
-use crate::input::{Notches, Pressed, Rect};
+use crate::input::{Notches, Pressed, Rect, chord_events};
 use crate::mac::events::{ClickCounter, MoveKind, flags_for, move_kind, phase_to_cg};
 use crate::mac::keymap::code_to_vk;
 
@@ -55,7 +55,8 @@ fn button_number(b: Button) -> i64 {
 /// `kCGEventGestureHIDType` 110, `kCGEventGestureZoomValue` 113,
 /// `kCGEventGestureRotationValue` 114, `kCGEventGesturePhase` 132), WebKitTestRunner's
 /// use of HID type 8 (`kIOHIDEventTypeZoom`), IOKit's `IOHIDEventTypes.h` (rotation = 5) and
-/// the public `CGGesturePhase` values in CoreGraphics' CGEventTypes.h.
+/// the public `CGGesturePhase` values in CoreGraphics' CGEventTypes.h; smart zoom is HID type 22
+/// (`kIOHIDEventTypeZoomToggle`) in Mac Mouse Fix's TouchSimulator.
 fn private_gesture_event(source: &CGEventSource, gesture: Gesture, phase: Phase) -> Option<CFRetained<CGEvent>> {
     const GESTURE_TYPE: u32 = 29; // kCGSEventGesture
     const HID_TYPE: CGEventField = CGEventField(110);
@@ -64,13 +65,18 @@ fn private_gesture_event(source: &CGEventSource, gesture: Gesture, phase: Phase)
     const PHASE: CGEventField = CGEventField(132);
     let ev = CGEvent::new(Some(source))?;
     CGEvent::set_type(Some(&ev), CGEventType(GESTURE_TYPE));
-    let (hid, value_field, value) = match gesture {
-        Gesture::Magnify { milli } => (8, ZOOM_VALUE, f64::from(milli) / 1000.0),
-        Gesture::Rotate { millideg } => (5, ROTATION_VALUE, f64::from(millideg) / 1000.0),
-        Gesture::SmartZoom => return None, // shortcut: no known event shape for smart zoom; add when found
+    let (hid, value) = match gesture {
+        Gesture::Magnify { milli } => (8, Some((ZOOM_VALUE, f64::from(milli) / 1000.0))),
+        Gesture::Rotate { millideg } => (5, Some((ROTATION_VALUE, f64::from(millideg) / 1000.0))),
+        // kIOHIDEventTypeZoomToggle (22), as Mac Mouse Fix's TouchSimulator posts a smart zoom.
+        Gesture::SmartZoom => (22, None),
+        // shortcut: the neutral gestures have no event shape here; `chord_for` types the Mac's own shortcuts instead
+        Gesture::TwoFingerDoubleTap | Gesture::TwoFingerSwipe { .. } => return None,
     };
     CGEvent::set_integer_value_field(Some(&ev), HID_TYPE, hid);
-    CGEvent::set_double_value_field(Some(&ev), value_field, value);
+    if let Some((field, v)) = value {
+        CGEvent::set_double_value_field(Some(&ev), field, v);
+    }
     // Same bit values as the public CGGesturePhase scroll phases.
     CGEvent::set_integer_value_field(Some(&ev), PHASE, phase_to_cg(phase).0);
     Some(ev)
@@ -243,12 +249,20 @@ impl Injector {
         }
     }
 
+    /// Types `chord` (a system shortcut such as Ctrl+Up), tracked like every key so
+    /// [`Self::release_all`] covers it; a key the remote user already holds is left alone.
+    pub fn chord(&mut self, chord: &[u32]) {
+        for (code, pressed) in chord_events(chord, |c| self.keys.contains(&c)) {
+            self.key(code, pressed);
+        }
+    }
+
     /// Posts a trackpad magnify, rotate or smart-zoom gesture event (see `private_gesture_event`),
     /// remembering an unfinished gesture so [`Self::release_all`] can end it.
     pub fn gesture(&mut self, gesture: Gesture, phase: Phase) {
         self.open_gesture = matches!(phase, Phase::Began | Phase::Changed | Phase::MayBegin)
             .then_some(gesture)
-            .filter(|g| !matches!(g, Gesture::SmartZoom));
+            .filter(|g| matches!(g, Gesture::Magnify { .. } | Gesture::Rotate { .. }));
         if let Some(ev) = private_gesture_event(&self.source, gesture, phase) {
             self.post(&ev);
         }

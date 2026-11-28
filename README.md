@@ -231,6 +231,7 @@ cargo run --release -p overdesk-net --example latency
 | Encrypted peer-to-peer, text clipboard | ✅ | ✅ |
 | Image and file clipboard | — | ✅ |
 | Trackpad gestures (pinch, rotate) | — | ✅ |
+| Magic Mouse and trackpad gestures on a PC (two-finger double-tap, two-finger swipe), each mapped to an action you pick: Task View, switch desktop, Back and more | — | ✅ |
 | Android TV | — | ✅ |
 | Apple TV as a remote (keyboard, mouse and trackpad become its remote) | Listed, locked | ✅ |
 

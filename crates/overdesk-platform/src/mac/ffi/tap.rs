@@ -24,7 +24,7 @@ use overdesk_proto::{Button, Gesture, Phase, ScrollUnit};
 use super::display::{DisplayWatch, desktop_bounds};
 use super::{Captured, INJECTED_TAG, MacError, permissions};
 use crate::input::{EscapeChord, Held, LocalDowns, Rect, Sink, Subpixel, UNITS_PER_NOTCH, to_local};
-use crate::mac::events::{ModChange, modifier_change, phase_from_cg};
+use crate::mac::events::{DockSample, DockSwipe, HID_DOCK_SWIPE, ModChange, modifier_change, phase_from_cg};
 use crate::mac::keymap::vk_to_code;
 
 /// State for the event tap callback, passed to Quartz as the tap's `userInfo` pointer.
@@ -47,6 +47,10 @@ struct TapCtx {
     chord: RefCell<EscapeChord>,
     /// Whether this tap last hid the cursor.
     detached: Cell<bool>,
+    /// Folds a Dock swipe's events into one gesture.
+    dock: RefCell<DockSwipe>,
+    /// Logs the raw fields of gesture events (`OVERDESK_GESTURE_PROBE`), to confirm them on hardware.
+    probe: bool,
 }
 
 unsafe extern "C" {
@@ -216,6 +220,9 @@ fn run_tap(tx: Sink, swallow: Arc<AtomicBool>, stop: Arc<AtomicBool>, ready: Sen
         CGEventType(18),
         CGEventType(29),
         CGEventType(30),
+        // 31 (kCGSEventFluidTouchGesture, NSEventTypeSwipe): navigation swipes, seen by
+        // the probe and consumed with the rest while input is swallowed.
+        CGEventType(31),
         CGEventType(32),
     ]
     .iter()
@@ -231,6 +238,8 @@ fn run_tap(tx: Sink, swallow: Arc<AtomicBool>, stop: Arc<AtomicBool>, ready: Sen
         sub: RefCell::new(Subpixel::default()),
         chord: RefCell::new(EscapeChord::default()),
         detached: Cell::new(false),
+        dock: RefCell::new(DockSwipe::default()),
+        probe: std::env::var_os("OVERDESK_GESTURE_PROBE").is_some(),
     });
     let ctx_ptr = &*ctx as *const TapCtx as *mut c_void;
     let callback: CGEventTapCallBack = Some(tap_callback);
@@ -315,6 +324,7 @@ unsafe extern "C-unwind" fn tap_callback(
 fn recover_after_disable(ctx: &TapCtx) {
     *ctx.chord.borrow_mut() = EscapeChord::default();
     *ctx.local.borrow_mut() = LocalDowns::default();
+    ctx.dock.borrow_mut().reset();
     if ctx.swallow.swap(false, Ordering::Relaxed) {
         let _ = ctx.tx.send(Captured::Escape);
     }
@@ -342,6 +352,9 @@ fn handle(ctx: &TapCtx, ty: CGEventType, ev: &CGEvent, raw: *mut CGEvent) -> *mu
     if CGEvent::integer_value_field(Some(ev), CGEventField::EventSourceUserData) == INJECTED_TAG {
         return raw;
     }
+    if ctx.probe && matches!(ty.0, 18 | 29..=32) {
+        probe_log(ty, ev);
+    }
     let edge = translate(ty, ev, ctx);
     if let Some((Held::Key(code), down)) = edge
         && ctx.chord.borrow_mut().key(code, down)
@@ -361,7 +374,54 @@ fn handle(ctx: &TapCtx, ty: CGEventType, ev: &CGEvent, raw: *mut CGEvent) -> *mu
         Some((held, down)) => ctx.local.borrow_mut().deliver_locally(held, down, swallowing),
         None => passes_unmapped(ty, swallowing),
     };
+    if !deliver && swallowing && is_dock_swipe(ty, ev) && field(ev, DOCK_PHASE) == 4 {
+        // shortcut: on macOS 27 the Dock needs a swipe's end to close its gesture state (as the
+        // open ISS project found), so the end passes with its motion zeroed; unverified, hand test.
+        for f in [DOCK_PROGRESS, DOCK_VELOCITY_X, DOCK_VELOCITY_Y] {
+            CGEvent::set_double_value_field(Some(ev), f, 0.0);
+        }
+        return raw;
+    }
     if deliver { raw } else { null_mut() }
+}
+
+/// `kCGEventGestureHIDType`: what kind of gesture a type 29/30 event carries.
+const DOCK_HID_TYPE: CGEventField = CGEventField(110);
+/// `kCGEventGestureSwipeMotion`: 1 sideways, 2 vertical, 3 pinch.
+const DOCK_MOTION: CGEventField = CGEventField(123);
+/// `kCGEventGestureSwipeProgress`: signed swipe progress.
+const DOCK_PROGRESS: CGEventField = CGEventField(124);
+/// `kCGEventGestureSwipeVelocityX`.
+const DOCK_VELOCITY_X: CGEventField = CGEventField(129);
+/// `kCGEventGestureSwipeVelocityY`.
+const DOCK_VELOCITY_Y: CGEventField = CGEventField(130);
+/// `kCGEventGesturePhase`.
+const DOCK_PHASE: CGEventField = CGEventField(132);
+/// `kCGEventGestureSwipeValue`: the direction mask of a navigation swipe.
+const SWIPE_VALUE: CGEventField = CGEventField(115);
+/// The event's own CGS type (`kCGSEventTypeField`), which can differ from the tap's `type`.
+const CGS_TYPE: CGEventField = CGEventField(55);
+
+/// Whether `ev` is a Dock swipe (CGS type 30 is also the public magnify type, told apart by its HID type).
+fn is_dock_swipe(ty: CGEventType, ev: &CGEvent) -> bool {
+    ty.0 == 30 && field(ev, DOCK_HID_TYPE) == HID_DOCK_SWIPE
+}
+
+/// Logs what a gesture event carries, never anything the user typed (see `OVERDESK_GESTURE_PROBE`).
+fn probe_log(ty: CGEventType, ev: &CGEvent) {
+    let f = |x| CGEvent::double_value_field(Some(ev), x);
+    overdesk_proto::log::info(format_args!(
+        "gesture probe: type={} cgs={} hid={} motion={} phase={} progress={:.4} vx={:.2} vy={:.2} swipe={}",
+        ty.0,
+        field(ev, CGS_TYPE),
+        field(ev, DOCK_HID_TYPE),
+        field(ev, DOCK_MOTION),
+        field(ev, DOCK_PHASE),
+        f(DOCK_PROGRESS),
+        f(DOCK_VELOCITY_X),
+        f(DOCK_VELOCITY_Y),
+        field(ev, SWIPE_VALUE),
+    ));
 }
 
 /// Reads integer field `f` of `ev` (`CGEventGetIntegerValueField`).
@@ -472,7 +532,23 @@ fn translate(ty: CGEventType, ev: &CGEvent, ctx: &TapCtx) -> Option<(Held, bool)
             });
             None
         }
-        CGEventType(18) | CGEventType(29) | CGEventType(30) | CGEventType(32) => {
+        // A Dock swipe shares type 30 with magnify; AppKit would decode it as a zero magnify.
+        CGEventType(30) if is_dock_swipe(ty, ev) => {
+            let progress = CGEvent::double_value_field(Some(ev), DOCK_PROGRESS);
+            let sample = DockSample {
+                motion: field(ev, DOCK_MOTION),
+                phase: field(ev, DOCK_PHASE),
+                progress,
+            };
+            if let Some(gesture) = ctx.dock.borrow_mut().feed(sample) {
+                send(Captured::Gesture {
+                    gesture,
+                    phase: Phase::None,
+                });
+            }
+            None
+        }
+        CGEventType(18) | CGEventType(29) | CGEventType(30) | CGEventType(31) | CGEventType(32) => {
             gesture(ev, |gesture, phase| send(Captured::Gesture { gesture, phase }));
             None
         }
@@ -527,6 +603,8 @@ mod tests {
             sub: RefCell::new(Subpixel::default()),
             chord: RefCell::new(EscapeChord::default()),
             detached: Cell::new(false),
+            dock: RefCell::new(DockSwipe::default()),
+            probe: false,
         };
         (ctx, rx)
     }

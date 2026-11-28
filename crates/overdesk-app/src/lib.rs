@@ -249,11 +249,15 @@ struct App {
     licence: Activation,
     /// A notice from the app itself (not the controller), shown until dismissed.
     notice: Option<String>,
+    /// What each gesture a Mac reports does on this computer, and the Mac that made the choices appear.
+    gestures: overdeskd::gestures::Settings,
 }
 
 /// Everything that can change the app: controller events, system events and user input.
 #[derive(Debug, Clone)]
 enum Message {
+    /// The user chose what a gesture does.
+    Gesture(overdeskd::gestures::Trigger, overdeskd::gestures::GestureAction),
     /// The controller started, or failed to.
     Started(Result<(mpsc::UnboundedSender<Command>, AppState), String>),
     /// The controller published a new state.
@@ -344,6 +348,7 @@ impl App {
             login_error: None,
             licence: Activation::default(),
             notice: None,
+            gestures: overdeskd::gestures::Settings::load(&store_dir()),
         }
     }
 
@@ -458,6 +463,10 @@ impl App {
                 self.visible |= f;
             }
             Message::DismissNotice => self.notice = None,
+            Message::Gesture(trigger, action) => {
+                self.gestures.map.set(trigger, action);
+                self.save_gestures();
+            }
             // The subscription only exists while wanted, but a queued tick may outlive it.
             Message::KeepPairingOpen => {
                 if self.pairing_wanted() {
@@ -509,11 +518,32 @@ impl App {
         if let Some(ext) = &self.ext {
             ext.on_state(&new);
         }
+        self.remember_gesture_mac(&new.phase);
         if let Screen::Running { state, .. } = &mut self.screen {
             *state = new;
             if let Some(tray) = &self.tray {
                 tray.sync(state);
             }
+        }
+    }
+
+    /// Remembers a connected Mac that reports a pointing device, so its gesture choices stay
+    /// listed after it leaves.
+    fn remember_gesture_mac(&mut self, phase: &Phase) {
+        let Phase::Connected { peers, .. } = phase else { return };
+        let mac = peers
+            .iter()
+            .find(|p| overdeskd::gestures::reports_pointing(p.os, p.features));
+        if let Some(mac) = mac.filter(|m| self.gestures.seen.as_deref() != Some(m.name.as_str())) {
+            self.gestures.seen = Some(mac.name.clone());
+            self.save_gestures();
+        }
+    }
+
+    /// Saves the gesture choices (they already apply); a failure only costs them at the next start.
+    fn save_gestures(&self) {
+        if let Err(e) = self.gestures.save(&store_dir()) {
+            overdesk_proto::log::warn(format_args!("could not save the gesture choices: {e}"));
         }
     }
 

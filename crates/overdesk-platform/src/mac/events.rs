@@ -2,7 +2,7 @@
 //! Pure Quartz event semantics: what makes injected input indistinguishable from real
 //! Apple hardware. Constants come from CGEventTypes.h and IOLLEvent.h.
 
-use overdesk_proto::{Button, PAGE_APPLE_TOP_CASE, Phase};
+use overdesk_proto::{Button, Gesture, PAGE_APPLE_TOP_CASE, Phase};
 
 use super::keymap::vk_to_code;
 use crate::input::CAPS_CODE;
@@ -187,6 +187,80 @@ impl ClickCounter {
     }
 }
 
+/// `kCGEventGestureHIDType` (field 110) of a Dock swipe (`kIOHIDEventTypeDockSwipe`).
+pub const HID_DOCK_SWIPE: i64 = 23;
+/// `kCGEventGestureSwipeMotion` (field 123) of a sideways Dock swipe (between Spaces or pages).
+const MOTION_HORIZONTAL: i64 = 1;
+/// `kCGGesturePhaseBegan` (field 132; CGEventTypes.h `CGGesturePhase`).
+const PHASE_BEGAN: i64 = 1;
+/// `kCGGesturePhaseEnded`.
+const PHASE_ENDED: i64 = 4;
+/// `kCGGesturePhaseCancelled`.
+const PHASE_CANCELLED: i64 = 8;
+/// Swipe progress (field 124, about 1.0 for a full swipe) at which a swipe commits instead of springing back.
+const COMMIT_PROGRESS: f64 = 0.1;
+
+/// The raw fields of one Dock swipe event, as the tap reads them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DockSample {
+    /// `kCGEventGestureSwipeMotion` (field 123): 1 sideways, 2 vertical, 3 pinch.
+    pub motion: i64,
+    /// `kCGEventGesturePhase` (field 132).
+    pub phase: i64,
+    /// `kCGEventGestureSwipeProgress` (field 124), signed, accumulated since the swipe began.
+    pub progress: f64,
+}
+
+/// Turns the many events of one Dock swipe into one [`Gesture`], on the swipe's end.
+#[derive(Debug, Default)]
+pub struct DockSwipe {
+    /// The latest non-zero progress of the swipe in flight; `None` outside one.
+    progress: Option<f64>,
+}
+
+impl DockSwipe {
+    /// Forgets a swipe in flight (the tap was off and may have missed its end).
+    pub fn reset(&mut self) {
+        self.progress = None;
+    }
+
+    /// Feeds one event; returns the gesture when a sideways swipe ends past a tenth of a full swipe.
+    pub fn feed(&mut self, s: DockSample) -> Option<Gesture> {
+        if s.motion != MOTION_HORIZONTAL {
+            return None; // shortcut: vertical (Mission Control) and pinch swipes are not forwarded yet
+        }
+        match s.phase {
+            PHASE_BEGAN => self.progress = Some(0.0),
+            PHASE_CANCELLED => self.progress = None,
+            PHASE_ENDED => {
+                let last = self.progress.take()?;
+                let p = if s.progress == 0.0 { last } else { s.progress };
+                // shortcut: positive progress is taken as "the Space on the right" (fingers moved
+                // left, natural scrolling), after the open ISS project; macOS 27 and a Magic Mouse
+                // are unverified, so flip here if the hand test shows it reversed.
+                return (p.abs() >= COMMIT_PROGRESS).then_some(Gesture::TwoFingerSwipe { right: p < 0.0 });
+            }
+            _ => {
+                if let (Some(last), true) = (self.progress.as_mut(), s.progress != 0.0) {
+                    *last = s.progress;
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Which Apple pointing devices a HID device is: `(Magic Mouse, trackpad)`. Ids are from the Linux
+/// kernel's `hid-ids.h` (Magic Mouse 0x030d, 0x0269, 0x0323; Magic Trackpad 0x030e, 0x0265,
+/// 0x0324) under Apple's USB (0x05ac) and Bluetooth (0x004c) vendor ids; a built-in trackpad is
+/// the "Apple Internal Keyboard / Trackpad" product.
+pub fn pointing_kind(vendor: i64, product: i64, name: &str) -> (bool, bool) {
+    let apple = matches!(vendor, 0x05ac | 0x004c);
+    let mouse = apple && matches!(product, 0x030d | 0x0269 | 0x0323);
+    let pad = (apple && matches!(product, 0x030e | 0x0265 | 0x0324)) || name == "Apple Internal Keyboard / Trackpad";
+    (mouse, pad)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,5 +394,83 @@ mod tests {
         assert!(l.deliver_locally(Held::Key(0x04), false, false));
         // Already released: a later release while swallowing is not local.
         assert!(!l.deliver_locally(Held::Key(0x04), false, true));
+    }
+    /// A recorded-style sideways swipe: began, a few changes, ended.
+    fn swipe(steps: &[(i64, f64)]) -> Vec<Option<Gesture>> {
+        let mut d = DockSwipe::default();
+        steps
+            .iter()
+            .map(|&(phase, progress)| {
+                d.feed(DockSample {
+                    motion: 1,
+                    phase,
+                    progress,
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_committed_sideways_swipe_fires_once_at_its_end() {
+        let out = swipe(&[(1, 0.0), (2, 0.04), (2, 0.31), (4, 0.31)]);
+        assert_eq!(&out[..3], [None, None, None]);
+        assert_eq!(out[3], Some(Gesture::TwoFingerSwipe { right: false }));
+        let out = swipe(&[(1, 0.0), (2, -0.2), (4, 0.0)]);
+        assert_eq!(
+            out[2],
+            Some(Gesture::TwoFingerSwipe { right: true }),
+            "end without progress uses the last"
+        );
+    }
+
+    #[test]
+    fn a_short_cancelled_or_unbegun_swipe_fires_nothing() {
+        assert_eq!(swipe(&[(1, 0.0), (2, 0.05), (4, 0.05)])[2], None);
+        assert_eq!(swipe(&[(1, 0.0), (2, 0.5), (8, 0.5), (4, 0.5)]), vec![None; 4]);
+        assert_eq!(swipe(&[(4, 0.9)]), vec![None], "an end with no begin (tap was off)");
+    }
+
+    #[test]
+    fn vertical_and_pinch_swipes_are_ignored_and_reset_forgets() {
+        let mut d = DockSwipe::default();
+        for motion in [2, 3] {
+            for phase in [1, 2, 4] {
+                assert_eq!(
+                    d.feed(DockSample {
+                        motion,
+                        phase,
+                        progress: 0.9
+                    }),
+                    None
+                );
+            }
+        }
+        d.feed(DockSample {
+            motion: 1,
+            phase: 1,
+            progress: 0.0,
+        });
+        d.reset();
+        assert_eq!(
+            d.feed(DockSample {
+                motion: 1,
+                phase: 4,
+                progress: 0.9
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn apple_pointing_devices_are_told_by_id_and_name() {
+        assert_eq!(pointing_kind(0x004c, 0x0269, "Magic Mouse"), (true, false));
+        assert_eq!(pointing_kind(0x05ac, 0x0324, ""), (false, true));
+        assert_eq!(pointing_kind(0, 0, "Apple Internal Keyboard / Trackpad"), (false, true));
+        assert_eq!(
+            pointing_kind(0x046d, 0x0269, "Other"),
+            (false, false),
+            "not Apple's vendor id"
+        );
+        assert_eq!(pointing_kind(0x05ac, 0x0267, "Magic Keyboard"), (false, false));
     }
 }

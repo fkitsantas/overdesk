@@ -409,8 +409,279 @@ const WHEEL_PER_MILLI: (i32, i32) = (120, 100);
 pub fn pinch_wheel(gesture: Gesture) -> Option<i32> {
     match gesture {
         Gesture::Magnify { milli } => Some(milli.saturating_mul(WHEEL_PER_MILLI.0) / WHEEL_PER_MILLI.1),
-        Gesture::Rotate { .. } | Gesture::SmartZoom => None,
+        // The neutral gestures are not pinches: the receiver maps them to an action (see `GestureAction`).
+        Gesture::Rotate { .. } | Gesture::SmartZoom | Gesture::TwoFingerDoubleTap | Gesture::TwoFingerSwipe { .. } => {
+            None
+        }
     }
+}
+
+/// Which kind of computer acts on a Mac's gestures: each has its own shortcuts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Desktop {
+    /// Windows.
+    Windows,
+    /// macOS (another Mac driven by this one's mouse): no picker, the gestures map to its own system shortcuts.
+    Mac,
+    /// GNOME Shell on Linux or BSD.
+    Gnome,
+    /// KDE Plasma (KWin) on Linux or BSD.
+    Kde,
+    /// Any other desktop: only the shortcuts every desktop shares.
+    Other,
+}
+
+impl Desktop {
+    /// The Linux/BSD desktop named by `XDG_CURRENT_DESKTOP` (a colon-separated list such as
+    /// `ubuntu:GNOME`).
+    pub fn from_desktop(xdg_current_desktop: &str) -> Self {
+        let has = |name: &str| xdg_current_desktop.split(':').any(|d| d.eq_ignore_ascii_case(name));
+        if has("GNOME") {
+            Self::Gnome
+        } else if has("KDE") {
+            Self::Kde
+        } else {
+            Self::Other
+        }
+    }
+
+    /// The actions its picker lists, grouped and in order; each has a chord here.
+    pub fn actions(self) -> Vec<GestureAction> {
+        GestureAction::ALL
+            .into_iter()
+            .filter(|a| a.chord(self).is_some())
+            .collect()
+    }
+}
+
+/// What a computer does when a Mac reports a gesture; the user picks one per gesture. One list
+/// for every receiver: [`GestureAction::chord`] says which exist where.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GestureAction {
+    /// Nothing.
+    Nothing,
+    /// The window overview: Task View, Mission Control, GNOME Activities, KDE Overview.
+    Overview,
+    /// Switch apps (Alt+Tab).
+    SwitchApps,
+    /// The previous virtual desktop, workspace or Space.
+    PreviousDesktop,
+    /// The next virtual desktop, workspace or Space.
+    NextDesktop,
+    /// Show the desktop (Windows, KDE).
+    ShowDesktop,
+    /// The Start menu (Windows).
+    StartMenu,
+    /// Quick settings (Windows).
+    QuickSettings,
+    /// The notification centre (Windows).
+    Notifications,
+    /// GNOME's Show Apps view.
+    ShowApps,
+    /// KDE's Present Windows.
+    PresentWindows,
+    /// Mac's App Exposé.
+    AppExpose,
+    /// Back in a browser or file manager.
+    Back,
+    /// Forward in a browser or file manager.
+    Forward,
+    /// Close the browser tab.
+    CloseTab,
+    /// Snap the window to the left half (Windows).
+    SnapLeft,
+    /// Snap the window to the right half (Windows).
+    SnapRight,
+    /// Maximize the window (Windows).
+    Maximize,
+    /// Minimize the window (Windows).
+    Minimize,
+}
+
+/// Overdesk code (HID usage) of Control.
+const K_CTRL: u32 = CTRL_KEY;
+/// Left Alt (Option).
+const K_ALT: u32 = 0xE2;
+/// Left Windows / Super / Meta / Command key.
+const K_GUI: u32 = 0xE3;
+/// `A`.
+const K_A: u32 = 0x04;
+/// `D`.
+const K_D: u32 = 0x07;
+/// `N`.
+const K_N: u32 = 0x11;
+/// `W`.
+const K_W: u32 = 0x1A;
+/// Tab.
+const K_TAB: u32 = 0x2B;
+/// `[`.
+const K_LBRACKET: u32 = 0x2F;
+/// `]`.
+const K_RBRACKET: u32 = 0x30;
+/// F9.
+const K_F9: u32 = 0x42;
+/// Page Up.
+const K_PGUP: u32 = 0x4B;
+/// Page Down.
+const K_PGDN: u32 = 0x4E;
+/// Right arrow.
+const K_RIGHT: u32 = 0x4F;
+/// Left arrow.
+const K_LEFT: u32 = 0x50;
+/// Down arrow.
+const K_DOWN: u32 = 0x51;
+/// Up arrow.
+const K_UP: u32 = 0x52;
+
+impl GestureAction {
+    /// Every action, grouped as a picker lists them: overview and apps, desktops, browser, window.
+    pub const ALL: [Self; 19] = [
+        Self::Overview,
+        Self::SwitchApps,
+        Self::ShowDesktop,
+        Self::StartMenu,
+        Self::QuickSettings,
+        Self::Notifications,
+        Self::ShowApps,
+        Self::PresentWindows,
+        Self::AppExpose,
+        Self::PreviousDesktop,
+        Self::NextDesktop,
+        Self::Back,
+        Self::Forward,
+        Self::CloseTab,
+        Self::SnapLeft,
+        Self::SnapRight,
+        Self::Maximize,
+        Self::Minimize,
+        Self::Nothing,
+    ];
+
+    /// The word saved in the settings file.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Nothing => "nothing",
+            Self::Overview => "overview",
+            Self::SwitchApps => "switch-apps",
+            Self::PreviousDesktop => "previous-desktop",
+            Self::NextDesktop => "next-desktop",
+            Self::ShowDesktop => "show-desktop",
+            Self::StartMenu => "start-menu",
+            Self::QuickSettings => "quick-settings",
+            Self::Notifications => "notifications",
+            Self::ShowApps => "show-apps",
+            Self::PresentWindows => "present-windows",
+            Self::AppExpose => "app-expose",
+            Self::Back => "back",
+            Self::Forward => "forward",
+            Self::CloseTab => "close-tab",
+            Self::SnapLeft => "snap-left",
+            Self::SnapRight => "snap-right",
+            Self::Maximize => "maximize",
+            Self::Minimize => "minimize",
+        }
+    }
+
+    /// The action saved as `id`; `None` for a word this version does not know.
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|a| a.id() == id)
+    }
+
+    /// What a picker shows on `r`, with the shortcut it types.
+    pub const fn label(self, r: Desktop) -> &'static str {
+        use Desktop::{Gnome, Kde, Mac, Windows};
+        match (self, r) {
+            (Self::Nothing, _) => "Do nothing",
+            (Self::Overview, Windows) => "Task View (Win+Tab)",
+            (Self::Overview, Mac) => "Mission Control (Ctrl+Up)",
+            (Self::Overview, Gnome) => "Activities overview (Super)",
+            (Self::Overview, Kde) => "Overview (Meta+W)",
+            (Self::Overview, _) => "Overview",
+            (Self::SwitchApps, _) => "Switch apps (Alt+Tab)",
+            (Self::PreviousDesktop, Windows) => "Previous desktop (Ctrl+Win+Left)",
+            (Self::NextDesktop, Windows) => "Next desktop (Ctrl+Win+Right)",
+            (Self::PreviousDesktop, Mac) => "Previous Space (Ctrl+Left)",
+            (Self::NextDesktop, Mac) => "Next Space (Ctrl+Right)",
+            (Self::PreviousDesktop, Gnome) => "Previous workspace (Super+Page Up)",
+            (Self::NextDesktop, Gnome) => "Next workspace (Super+Page Down)",
+            (Self::PreviousDesktop, _) => "Previous desktop (Ctrl+Meta+Left)",
+            (Self::NextDesktop, _) => "Next desktop (Ctrl+Meta+Right)",
+            (Self::ShowDesktop, Windows) => "Show desktop (Win+D)",
+            (Self::ShowDesktop, _) => "Show desktop (Meta+D)",
+            (Self::StartMenu, _) => "Start menu (Win)",
+            (Self::QuickSettings, _) => "Quick settings (Win+A)",
+            (Self::Notifications, _) => "Notifications (Win+N)",
+            (Self::ShowApps, _) => "Show apps (Super+A)",
+            (Self::PresentWindows, _) => "Present windows (Ctrl+F9)",
+            (Self::AppExpose, _) => "App Expos\u{e9} (Ctrl+Down)",
+            (Self::Back, Mac) => "Back (Cmd+[)",
+            (Self::Forward, Mac) => "Forward (Cmd+])",
+            (Self::Back, _) => "Back (Alt+Left)",
+            (Self::Forward, _) => "Forward (Alt+Right)",
+            (Self::CloseTab, Mac) => "Close tab (Cmd+W)",
+            (Self::CloseTab, _) => "Close tab (Ctrl+W)",
+            (Self::SnapLeft, _) => "Snap window left (Win+Left)",
+            (Self::SnapRight, _) => "Snap window right (Win+Right)",
+            (Self::Maximize, _) => "Maximize window (Win+Up)",
+            (Self::Minimize, _) => "Minimize window (Win+Down)",
+        }
+    }
+
+    /// The keys that perform it on `r`, modifiers first; `None` if `r` has no such shortcut.
+    /// Defaults checked: GNOME `gsettings-desktop-schemas` (`switch-to-workspace-left/right` =
+    /// `<Super>Page_Up/Down`, `switch-applications` = `<Alt>Tab`, `toggle-application-view` =
+    /// `<Super>a`, the overview is the bare Super key) and KDE `kwin` (`overvieweffect.cpp`
+    /// Meta+W, `windowvieweffect.cpp` Ctrl+F9, `virtualdesktops.cpp` Ctrl+Meta+Left/Right,
+    /// `useractions.cpp` Meta+D); Windows and macOS are the documented system shortcuts.
+    pub const fn chord(self, r: Desktop) -> Option<&'static [u32]> {
+        use Desktop::{Gnome, Kde, Mac, Windows};
+        let c: &'static [u32] = match (self, r) {
+            (Self::Nothing, _) => &[],
+            (Self::Overview, Windows) => &[K_GUI, K_TAB],
+            (Self::Overview, Mac) => &[K_CTRL, K_UP],
+            (Self::Overview, Gnome) => &[K_GUI],
+            (Self::Overview, Kde) => &[K_GUI, K_W],
+            (Self::SwitchApps, Mac) => return None,
+            (Self::SwitchApps, _) => &[K_ALT, K_TAB],
+            (Self::PreviousDesktop, Windows) => &[K_CTRL, K_GUI, K_LEFT],
+            (Self::NextDesktop, Windows) => &[K_CTRL, K_GUI, K_RIGHT],
+            (Self::PreviousDesktop, Mac) => &[K_CTRL, K_LEFT],
+            (Self::NextDesktop, Mac) => &[K_CTRL, K_RIGHT],
+            (Self::PreviousDesktop, Gnome) => &[K_GUI, K_PGUP],
+            (Self::NextDesktop, Gnome) => &[K_GUI, K_PGDN],
+            (Self::PreviousDesktop, Kde) => &[K_CTRL, K_GUI, K_LEFT],
+            (Self::NextDesktop, Kde) => &[K_CTRL, K_GUI, K_RIGHT],
+            (Self::ShowDesktop, Windows | Kde) => &[K_GUI, K_D],
+            (Self::StartMenu, Windows) => &[K_GUI],
+            (Self::QuickSettings, Windows) => &[K_GUI, K_A],
+            (Self::Notifications, Windows) => &[K_GUI, K_N],
+            (Self::ShowApps, Gnome) => &[K_GUI, K_A],
+            (Self::PresentWindows, Kde) => &[K_CTRL, K_F9],
+            (Self::AppExpose, Mac) => &[K_CTRL, K_DOWN],
+            (Self::Back, Mac) => &[K_GUI, K_LBRACKET],
+            (Self::Forward, Mac) => &[K_GUI, K_RBRACKET],
+            (Self::Back, _) => &[K_ALT, K_LEFT],
+            (Self::Forward, _) => &[K_ALT, K_RIGHT],
+            (Self::CloseTab, Mac) => &[K_GUI, K_W],
+            (Self::CloseTab, _) => &[K_CTRL, K_W],
+            (Self::SnapLeft, Windows) => &[K_GUI, K_LEFT],
+            (Self::SnapRight, Windows) => &[K_GUI, K_RIGHT],
+            (Self::Maximize, Windows) => &[K_GUI, K_UP],
+            (Self::Minimize, Windows) => &[K_GUI, K_DOWN],
+            _ => return None,
+        };
+        Some(c)
+    }
+}
+
+/// The key events that type `chord` on top of what is already held: presses in order, skipping
+/// keys the remote user holds (so their hold is not broken), then releases in reverse.
+pub fn chord_events(chord: &[u32], held: impl Fn(u32) -> bool) -> Vec<(u32, bool)> {
+    let ours: Vec<u32> = chord.iter().copied().filter(|c| !held(*c)).collect();
+    ours.iter()
+        .map(|c| (*c, true))
+        .chain(ours.iter().rev().map(|c| (*c, false)))
+        .collect()
 }
 
 /// Control+Option/Alt+Command/Win+Escape, left or right modifiers. Detected in the
@@ -525,6 +796,91 @@ impl LocalDowns {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use Desktop::{Gnome, Kde, Mac, Other, Windows};
+
+    #[test]
+    fn a_chord_presses_in_order_and_releases_in_reverse() {
+        let chord = |a: GestureAction, r| a.chord(r).unwrap();
+        let ev = chord_events(chord(GestureAction::PreviousDesktop, Windows), |_| false);
+        assert_eq!(
+            ev,
+            [
+                (0xE0, true),
+                (0xE3, true),
+                (0x50, true),
+                (0x50, false),
+                (0xE3, false),
+                (0xE0, false)
+            ]
+        );
+        assert_eq!(
+            chord_events(chord(GestureAction::Overview, Windows), |_| false).len(),
+            4
+        );
+        // A modifier the remote user already holds is neither pressed nor released.
+        let ev = chord_events(chord(GestureAction::PreviousDesktop, Windows), |c| c == 0xE0);
+        assert_eq!(ev, [(0xE3, true), (0x50, true), (0x50, false), (0xE3, false)]);
+        assert!(chord_events(chord(GestureAction::Nothing, Other), |_| false).is_empty());
+    }
+
+    #[test]
+    fn each_receiver_lists_only_shortcuts_it_has() {
+        let has = |r: Desktop, a| r.actions().contains(&a);
+        assert!(has(Windows, GestureAction::Minimize) && !has(Gnome, GestureAction::Minimize));
+        assert!(has(Gnome, GestureAction::ShowApps) && !has(Kde, GestureAction::ShowApps));
+        assert!(has(Kde, GestureAction::PresentWindows) && has(Kde, GestureAction::ShowDesktop));
+        assert!(!has(Gnome, GestureAction::ShowDesktop));
+        // Any other desktop: only what every desktop shares.
+        assert_eq!(
+            Other.actions(),
+            [
+                GestureAction::SwitchApps,
+                GestureAction::Back,
+                GestureAction::Forward,
+                GestureAction::CloseTab,
+                GestureAction::Nothing
+            ]
+        );
+        assert_eq!(GestureAction::Overview.chord(Gnome), Some(&[0xE3][..]), "bare Super");
+        assert_eq!(GestureAction::NextDesktop.chord(Gnome), Some(&[0xE3, 0x4E][..]));
+        assert_eq!(GestureAction::NextDesktop.chord(Kde), Some(&[0xE0, 0xE3, 0x4F][..]));
+        assert_eq!(GestureAction::Overview.chord(Mac), Some(&[0xE0, 0x52][..]));
+        assert_eq!(GestureAction::Back.chord(Mac), Some(&[0xE3, 0x2F][..]));
+    }
+
+    #[test]
+    fn the_desktop_is_read_from_xdg_current_desktop() {
+        assert_eq!(Desktop::from_desktop("ubuntu:GNOME"), Gnome);
+        assert_eq!(Desktop::from_desktop("KDE"), Kde);
+        assert_eq!(Desktop::from_desktop("gnome"), Gnome);
+        assert_eq!(Desktop::from_desktop("XFCE"), Other);
+        assert_eq!(Desktop::from_desktop(""), Other);
+        assert_eq!(Desktop::from_desktop("X-GNOMEISH"), Other);
+    }
+
+    #[test]
+    fn every_action_has_a_unique_id_a_label_and_ends_in_a_non_modifier() {
+        let ids: BTreeSet<_> = GestureAction::ALL.iter().map(|a| a.id()).collect();
+        assert_eq!(ids.len(), GestureAction::ALL.len());
+        for a in GestureAction::ALL {
+            assert_eq!(GestureAction::from_id(a.id()), Some(a));
+            for r in [Windows, Mac, Gnome, Kde, Other] {
+                assert!(!a.label(r).is_empty());
+                // Bare Windows key / Super: the Start menu and the GNOME overview are modifier-only.
+                let bare = matches!((a, r), (GestureAction::StartMenu | GestureAction::Overview, _))
+                    && a.chord(r).is_some_and(|c| c == [0xE3]);
+                if let Some(last) = a.chord(r).and_then(|c| c.last()).filter(|_| !bare) {
+                    assert!(!(0xE0..=0xE7).contains(last), "{a:?} on {r:?} must end on a real key");
+                }
+            }
+        }
+        assert_eq!(GestureAction::from_id("launch-missiles"), None);
+        assert_eq!(GestureAction::StartMenu.chord(Windows), Some(&[0xE3][..]));
+        assert_eq!(GestureAction::SnapRight.chord(Windows), Some(&[0xE3, 0x4F][..]));
+        assert_eq!(GestureAction::CloseTab.chord(Windows), Some(&[0xE0, 0x1A][..]));
+        assert_eq!(GestureAction::Maximize.chord(Gnome), None);
+    }
 
     const L_CTRL: u32 = 0xE0;
     const L_ALT: u32 = 0xE2;

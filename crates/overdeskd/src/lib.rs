@@ -7,6 +7,7 @@
 mod clipboard;
 pub mod controller;
 mod env;
+pub mod gestures;
 #[cfg(any(target_os = "macos", windows, free_unix))]
 pub mod native;
 mod platform;

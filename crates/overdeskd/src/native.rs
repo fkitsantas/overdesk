@@ -36,6 +36,15 @@ type NativeLayout = overdesk_platform::win::layout::WinLayout;
 #[cfg(free_unix)]
 type NativeLayout = overdesk_platform::linux::layout::X11Layout;
 
+/// The `FEATURE_*` bits this computer announces for gestures: a Mac says which Apple pointing
+/// devices it has; every computer announces that it acts on a Mac's gestures (see `gestures`).
+pub fn input_features() -> u64 {
+    #[cfg(target_os = "macos")]
+    return overdesk_platform::mac::ffi::pointing_features() | overdesk_proto::FEATURE_GESTURES;
+    #[cfg(not(target_os = "macos"))]
+    return overdesk_proto::FEATURE_GESTURES;
+}
+
 /// Why [`NativePlatform::start`] failed. The platform's own error is carried as its `Display` text.
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
@@ -108,6 +117,8 @@ impl NativePlatform {
     /// Starts capture and the injector thread. Fails if the OS refuses either, for
     /// example when a permission is missing.
     pub fn start() -> Result<Self, StartError> {
+        // The gesture choices saved by the app window; read once, then kept live by it.
+        crate::gestures::set_live(crate::gestures::Settings::load(&crate::store_dir()).map);
         let slot: Slot = Arc::default();
         let current = slot.clone();
         // The capture thread hands each event straight to the current session's queue (a
@@ -167,7 +178,14 @@ impl NativePlatform {
                                 injector.key(code, pressed);
                             }
                             Action::InjectScroll { dx, dy, unit, phase } => injector.scroll(dx, dy, unit, phase),
-                            Action::InjectGesture { gesture, phase } => injector.gesture(gesture, phase),
+                            Action::InjectGesture { gesture, phase } => {
+                                // Types the shortcut chosen for the gesture (a Mac's own); a pinch is replayed natively.
+                                if let Some(chord) = crate::gestures::chord_for(gesture) {
+                                    injector.chord(chord);
+                                    continue;
+                                }
+                                injector.gesture(gesture, phase);
+                            }
                             Action::ReleaseAll => injector.release_all(),
                             _ => {}
                         }

@@ -27,7 +27,7 @@ use super::events::{button_from_x, wheel_from_x, x_button};
 use super::ffi::LinuxError;
 use super::keymap::{code_to_keycode, keycode_to_code};
 use crate::input::EscapeChord;
-use crate::input::{CTRL_KEY, Captured, Notches, Pressed, Rect, Sink, Subpixel, Warning, pinch_wheel};
+use crate::input::{CTRL_KEY, Captured, Notches, Pressed, Rect, Sink, Subpixel, Warning, chord_events, pinch_wheel};
 
 /// Most wheel clicks one scroll event may inject, so a runaway remote delta cannot flood
 /// the server.
@@ -602,6 +602,14 @@ impl Injector {
         self.wheel_clicks(if clicks > 0 { 4 } else { 5 }, clicks);
         if !held {
             self.key(CTRL_KEY, false);
+        }
+    }
+
+    /// Types `chord` (a desktop shortcut such as Super+Page Down) through the tracked key path,
+    /// so [`Self::release_all`] covers it; a key the remote user already holds is left alone.
+    pub fn chord(&mut self, chord: &[u32]) {
+        for (code, pressed) in chord_events(chord, |c| self.keys.contains(&c)) {
+            self.key(code, pressed);
         }
     }
 

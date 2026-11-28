@@ -78,6 +78,8 @@ pub struct PeerView {
     pub name: String,
     /// The peer's operating system.
     pub os: Os,
+    /// The `FEATURE_*` bits the peer announced (a Mac says which pointing devices it has).
+    pub features: u64,
     /// What kind of device it is, so the UI can draw the right glyph.
     pub kind: DeviceKind,
     /// What to call it instead of its operating system (Pro names an "Apple TV"); `None` for a computer.

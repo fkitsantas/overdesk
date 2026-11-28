@@ -214,6 +214,14 @@ impl Injector {
         }
     }
 
+    /// Types a desktop shortcut: see the adapters' `chord`.
+    pub fn chord(&mut self, chord: &[u32]) {
+        match self {
+            Self::X11(i) => i.chord(chord),
+            Self::Wayland(i) => i.chord(chord),
+        }
+    }
+
     /// Releases every key and button this injector holds down.
     pub fn release_all(&mut self) {
         match self {

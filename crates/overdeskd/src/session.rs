@@ -67,6 +67,8 @@ pub struct Session {
     pub peer_name: String,
     /// The peer's operating system, which decides how keys are translated.
     pub peer_os: Os,
+    /// The `FEATURE_*` bits the peer announced.
+    pub peer_features: u64,
     /// The shared Desk both devices agreed on for this session.
     pub desk: Desk,
 }
@@ -189,6 +191,7 @@ async fn establish_inner(
         peer: peer.id,
         peer_name: peer.name,
         peer_os: peer.os,
+        peer_features: peer.features,
         desk,
     })
 }

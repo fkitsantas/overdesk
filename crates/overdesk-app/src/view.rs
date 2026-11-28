@@ -6,11 +6,13 @@ use std::sync::OnceLock;
 
 use iced::theme::Mode as ThemeMode;
 use iced::widget::{
-    Space, button, canvas, column, container, image, row, scrollable, stack, text, text_input, toggler,
+    Space, button, canvas, column, container, image, pick_list, row, scrollable, stack, text, text_input, toggler,
 };
 use iced::{Alignment, Element, Fill, Font, Length, Theme, font};
 use overdesk_proto::{Os, PeerId};
 use overdeskd::controller::{AppState, Command, DeviceKind, FileOffer, NearbyDevice, PeerView, Phase, Placement};
+use overdeskd::gestures::{self, Trigger};
+use overdeskd::gestures::{Desktop, GestureAction};
 use overdeskd::{Mode, Side};
 
 use super::{App, EDITION, Edition, INTER, Message, Permission, Screen, backdrop, desk, style};
@@ -247,7 +249,13 @@ impl App {
                     can_arrange: state.can_arrange
                 })
                 .width(Fill)
-                .height(if state.can_arrange { 170 } else { 250 }) // leaves room for the arrange rows
+                // Leaves room for the arrange rows and the gesture choices.
+                .height(match (state.can_arrange, self.gestures_shown(peers)) {
+                    (true, true) => 110,
+                    (false, true) => 150,
+                    (true, false) => 170,
+                    (false, false) => 250,
+                })
             )
             .padding(6)
             .style(style::panel),
@@ -256,6 +264,7 @@ impl App {
             text(hint).style(muted),
             Space::new().height(12),
             arrange_rows(state, peers),
+            self.gestures_section(peers),
             Space::new().height(6),
             row![
                 column![
@@ -277,6 +286,52 @@ impl App {
         ]
         .spacing(4)
         .into()
+    }
+
+    /// The Mac the gesture choices are about, if the section shows now.
+    fn gestures_mac(&self, peers: &[PeerView]) -> Option<String> {
+        let connected = peers
+            .iter()
+            .find(|p| gestures::reports_pointing(p.os, p.features))
+            .map(|p| p.name.as_str());
+        gestures::section_mac(gestures::has_picker(), connected, self.gestures.seen.as_deref())
+    }
+
+    /// Whether [`Self::gestures_section`] draws anything.
+    fn gestures_shown(&self, peers: &[PeerView]) -> bool {
+        self.gestures_mac(peers).is_some()
+    }
+
+    /// "Gestures from <Mac>": what each gesture of its Magic Mouse or trackpad does here. Free
+    /// only says it needs Pro, because the Mac's Pro link is what sends gestures.
+    fn gestures_section<'a>(&'a self, peers: &[PeerView]) -> Element<'a, Message> {
+        let Some(mac) = self.gestures_mac(peers) else {
+            return Space::new().into();
+        };
+        let title = text(format!("Gestures from {mac}")).size(14).font(bold());
+        if !EDITION.get().is_some_and(|e| (e.report)(0).pro) {
+            return column![title, text("Gestures need Overdesk Pro.").size(13).style(muted)]
+                .spacing(2)
+                .into();
+        }
+        let desktop = gestures::desktop();
+        let choices: Vec<Choice> = desktop.actions().into_iter().map(|a| Choice(a, desktop)).collect();
+        let rows = Trigger::ALL.into_iter().map(|t| {
+            row![
+                text(t.label()).size(13).style(muted).width(170),
+                pick_list(
+                    choices.clone(),
+                    Some(Choice(self.gestures.map.get(t, desktop), desktop)),
+                    move |c: Choice| Message::Gesture(t, c.0)
+                )
+                .text_size(13)
+                .width(Fill),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into()
+        });
+        column![title].extend(rows).spacing(4).into()
     }
 
     /// "Pair a device": which side the other computer is on, the computers found on the
@@ -351,6 +406,7 @@ impl App {
             settings = settings.push(text(e.as_str()).size(13).style(muted));
         }
         page = page.push(Space::new().height(8)).push(settings);
+        page = page.push(self.gestures_section(&[]));
         if let Some(edition) = EDITION.get() {
             page = page.push(self.licence_view(edition));
         }
@@ -889,5 +945,15 @@ mod tests {
     #[test]
     fn forgetting_asks_by_name() {
         assert_eq!(forget_prompt("MacBook"), "Forget MacBook? You'll need to pair again.");
+    }
+}
+
+/// An action as the gesture picker lists it: its name depends on the desktop it runs on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Choice(GestureAction, Desktop);
+
+impl std::fmt::Display for Choice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0.label(self.1))
     }
 }

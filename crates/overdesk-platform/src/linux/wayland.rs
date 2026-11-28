@@ -38,7 +38,9 @@ use super::wayland_core::{
     Input, MAX_STEPS, Machine, Out, Pointer, ScrollOut, Zone, desk_bounds, evdev_from_button, home_corner,
     plan_barriers, portal_unavailable, scroll_out,
 };
-use crate::input::{CTRL_KEY, Captured, Notches, Pressed, Rect, Sink, Warning, Warnings, box_relative, pinch_wheel};
+use crate::input::{
+    CTRL_KEY, Captured, Notches, Pressed, Rect, Sink, Warning, Warnings, box_relative, chord_events, pinch_wheel,
+};
 
 /// The id Overdesk registers with the portal as an unsandboxed app (basename of its
 /// `.desktop` file); see `docs/WAYLAND.md`.
@@ -574,6 +576,14 @@ impl Injector {
         let _ = self.tx.send(Msg::Steps(false, (-steps).clamp(-MAX_STEPS, MAX_STEPS)));
         if !held {
             self.key(CTRL_KEY, false);
+        }
+    }
+
+    /// Types `chord` (a desktop shortcut such as Super+Page Down) through the tracked key path,
+    /// so [`Self::release_all`] covers it; a key the remote user already holds is left alone.
+    pub fn chord(&mut self, chord: &[u32]) {
+        for (code, pressed) in chord_events(chord, |c| self.keys.contains(&c)) {
+            self.key(code, pressed);
         }
     }
 

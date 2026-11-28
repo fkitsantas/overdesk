@@ -11,7 +11,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 
 use super::display::{cursor_local, virtual_screen};
 use super::{INJECTED_TAG, WinError, XBUTTON1, XBUTTON2};
-use crate::input::{CTRL_KEY, Pressed, Rect, pinch_wheel, to_units};
+use crate::input::{CTRL_KEY, Pressed, Rect, chord_events, pinch_wheel, to_units};
 use crate::win::events::absolute;
 use crate::win::keymap::code_to_scan;
 
@@ -157,6 +157,15 @@ impl Injector {
         self.scroll(0, wheel, ScrollUnit::Notch120, phase);
         if !held {
             self.key(CTRL_KEY, false);
+        }
+    }
+
+    /// Types `chord` (a shortcut such as Win+Tab) through the tracked key path, so
+    /// [`Injector::release_all`] covers it: presses in order, releases in reverse, and a key the
+    /// remote user already holds is left alone.
+    pub fn chord(&mut self, chord: &[u32]) {
+        for (code, pressed) in chord_events(chord, |c| self.keys.contains(&c)) {
+            self.key(code, pressed);
         }
     }
 

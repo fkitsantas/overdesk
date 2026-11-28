@@ -296,6 +296,7 @@ impl<P: Platform + Clone + Sync> Dial<P> {
                     id: s.peer,
                     name: peer.clone(),
                     os: s.peer_os,
+                    features: s.peer_features,
                     kind: DeviceKind::Computer,
                     label: None,
                 }],
@@ -361,6 +362,11 @@ pub fn session_me(base: &Me, size: Option<(u32, u32)>) -> Me {
         me.width = width;
         me.height = height;
     }
+    // Read per session: a Magic Mouse may have been paired since the last one.
+    #[cfg(any(target_os = "macos", windows, free_unix))]
+    {
+        me.features |= crate::native::input_features();
+    }
     me
 }
 
@@ -397,10 +403,10 @@ mod tests {
             os: Os::MacOs,
             width: 1,
             height: 2,
-            features: 7,
+            features: 1 << 40,
         };
         let me = session_me(&base, Some((1440, 900)));
-        assert_eq!((me.width, me.height, me.features), (1440, 900, 7));
+        assert_eq!((me.width, me.height, me.features & 1 << 40), (1440, 900, 1 << 40));
         assert_eq!((session_me(&base, None).width, base.width), (1, 1));
     }
 

@@ -45,6 +45,7 @@ pub fn state(which: &str) -> (AppState, Option<(bool, bool)>) {
         id: peer,
         name: "DESKTOP-7Q2K4LM".into(),
         os: Os::Windows,
+        features: 0,
         kind: DeviceKind::Computer,
         label: None,
     }];
@@ -55,6 +56,7 @@ pub fn state(which: &str) -> (AppState, Option<(bool, bool)>) {
             id: third,
             name: "fedora".into(),
             os: Os::Linux,
+            features: 0,
             kind: DeviceKind::Computer,
             label: None,
         });

@@ -8,11 +8,13 @@
 mod clipboard;
 mod display;
 mod inject;
+mod pointing;
 mod tap;
 
 pub use clipboard::{clipboard_change_count, clipboard_is_private};
 pub use display::{main_display_size, monitors};
 pub use inject::Injector;
+pub use pointing::pointing_features;
 pub use tap::Capture;
 
 use objc2_core_graphics::{
