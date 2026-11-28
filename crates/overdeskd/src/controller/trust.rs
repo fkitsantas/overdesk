@@ -7,7 +7,7 @@
 //! Locks here survive a panic elsewhere: the guarded data is plain bookkeeping that is valid after
 //! any single update, so a poisoned lock is no reason to take the controller down.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -367,6 +367,28 @@ pub async fn pair_with_user(
     }
 }
 
+/// How often a paired device announced at a new address may skip its dial backoff. Announcements
+/// are unauthenticated, so without this limit anyone on the network could keep the backoff from
+/// ever running by announcing the device at changing addresses.
+pub const MOVE_FORGIVE_EVERY: Duration = Duration::from_secs(60);
+
+/// Drops `id`'s dial backoff in `retry` because it was announced at a new address, at most once per
+/// [`MOVE_FORGIVE_EVERY`] (tracked in `forgiven`). Returns whether the backoff was dropped.
+pub fn forgive_move(
+    retry: &mut BTreeMap<PeerId, Instant>,
+    forgiven: &mut BTreeMap<PeerId, Instant>,
+    id: PeerId,
+    now: Instant,
+) -> bool {
+    if forgiven.get(&id).is_some_and(|t| now < *t + MOVE_FORGIVE_EVERY) {
+        return false;
+    }
+    forgiven.insert(id, now);
+    // Old entries only matter for one window; keep the map as small as the peers that moved.
+    forgiven.retain(|_, t| now < *t + MOVE_FORGIVE_EVERY);
+    retry.remove(&id).is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,5 +511,25 @@ mod tests {
         let mut rx = w.prompt(7);
         w.answer(None, false);
         assert_eq!(rx.try_recv(), Ok(false), "an unnamed answer takes whatever is showing");
+    }
+
+    #[test]
+    fn a_moved_device_skips_its_backoff_at_most_once_a_minute() {
+        let (id, now) = (PeerId([7; 16]), Instant::now());
+        let (mut retry, mut forgiven) = (BTreeMap::new(), BTreeMap::new());
+        retry.insert(id, now + Duration::from_secs(60));
+        assert!(forgive_move(&mut retry, &mut forgiven, id, now));
+        assert!(retry.is_empty());
+        // A spoofed announcement at yet another address cannot clear the next backoff early.
+        retry.insert(id, now + Duration::from_secs(60));
+        assert!(!forgive_move(
+            &mut retry,
+            &mut forgiven,
+            id,
+            now + Duration::from_secs(10)
+        ));
+        assert!(retry.contains_key(&id));
+        assert!(forgive_move(&mut retry, &mut forgiven, id, now + MOVE_FORGIVE_EVERY));
+        assert!(retry.is_empty());
     }
 }

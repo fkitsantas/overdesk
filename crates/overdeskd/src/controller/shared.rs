@@ -34,6 +34,8 @@ pub(super) struct Shared<P> {
     pub(super) left: Mutex<BTreeSet<PeerId>>,
     /// Earliest time an automatic dial to a peer may be retried after a failure.
     pub(super) retry_after: Mutex<BTreeMap<PeerId, Instant>>,
+    /// When a peer last skipped its backoff by moving (see [`super::trust::forgive_move`]).
+    pub(super) forgiven: Mutex<BTreeMap<PeerId, Instant>>,
     /// Woken when this computer's network addresses changed, to redial at once.
     pub(super) network: Notify,
     /// Publishes [`AppState`] to the UI.
@@ -114,12 +116,18 @@ impl<P> Shared<P> {
     }
 
     /// Folds in one change heard on the network and republishes the lists. A paired device that
-    /// announces a new address loses its backoff, so the new address is tried at once.
+    /// announces a new address loses its backoff (at most once a minute), so the new address is
+    /// tried at once.
     pub(super) fn hear(&self, change: Change) {
         let pins = self.pins();
         let moved = apply_capped(&mut self.found.relock(), change, &pins);
         if let Some(id) = moved {
-            self.retry_after.relock().remove(&id);
+            super::trust::forgive_move(
+                &mut self.retry_after.relock(),
+                &mut self.forgiven.relock(),
+                id,
+                Instant::now(),
+            );
         }
         self.refresh_nearby();
     }
