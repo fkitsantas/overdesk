@@ -187,6 +187,8 @@ cd overdesk
 cargo run --release -p overdesk-app   # the desktop app
 ```
 
+Pull requests run the same checks on macOS, Windows and Linux (**CI**), plus GitHub's CodeQL security scan; first-time contributors sign the [CLA](CLA.md) with one comment.
+
 Run the app on two computers on the same network. Each lists the other under **Nearby devices**:
 pick it, check that both screens show the same 6-digit code, and you're sharing. Push the
 cursor off the shared edge to cross; press <kbd>⌃</kbd> <kbd>⌥</kbd> <kbd>⌘</kbd> <kbd>⎋</kbd>
