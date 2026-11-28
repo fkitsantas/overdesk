@@ -92,7 +92,7 @@ marked as private by password managers are never shared. No accounts, no cloud.
 <td valign="top">
 
 #### 🧭 Finds your computers by itself
-Nearby computers appear by name. Pair once; after a restart, sleep or a dropped Wi-Fi
+Nearby computers appear by name, each with its operating system's logo (Apple, Windows, Linux, Android; drawn in the text colour, with the name on hover). Pair once; after a restart, sleep or a dropped Wi-Fi
 they find each other and reconnect on their own. Uneven screens line up, even laptops
 beside taller monitors, and with Pro you arrange them by dragging on the Desk map. A paired
 device that is switched off still appears under **Paired devices**, where you can forget it;

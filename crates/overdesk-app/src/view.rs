@@ -7,6 +7,7 @@ use std::sync::OnceLock;
 use iced::theme::Mode as ThemeMode;
 use iced::widget::{
     Space, button, canvas, column, container, image, pick_list, row, scrollable, stack, text, text_input, toggler,
+    tooltip,
 };
 use iced::{Alignment, Element, Fill, Font, Length, Theme, font};
 use overdesk_proto::{Os, PeerId};
@@ -16,6 +17,7 @@ use overdeskd::gestures::{Desktop, GestureAction};
 use overdeskd::{Mode, Side};
 
 use super::{App, EDITION, Edition, INTER, Message, Permission, Screen, backdrop, desk, style};
+use crate::icons::{Icon, Logo};
 
 /// Digits in the PIN a remote device shows.
 pub(super) const PIN_DIGITS: usize = 4;
@@ -268,7 +270,11 @@ impl App {
             Space::new().height(6),
             row![
                 column![
-                    text(peer).font(bold()),
+                    named(
+                        first.map_or(DeviceKind::Computer, |p| p.kind),
+                        first.map(|p| p.os),
+                        text(peer).font(bold())
+                    ),
                     row![
                         text("●").size(11).style(|t: &Theme| text::Style {
                             color: Some(style::teal_text(t))
@@ -308,7 +314,12 @@ impl App {
         let Some(mac) = self.gestures_mac(peers) else {
             return Space::new().into();
         };
-        let title = text(format!("Gestures from {mac}")).size(14).font(bold());
+        // The picker exists only for a Mac's gestures, so the mark is Apple's.
+        let title = named(
+            DeviceKind::Computer,
+            Some(Os::MacOs),
+            text(format!("Gestures from {mac}")).size(14).font(bold()),
+        );
         if !EDITION.get().is_some_and(|e| (e.report)(0).pro) {
             return column![title, text("Gestures need Overdesk Pro.").size(13).style(muted)]
                 .spacing(2)
@@ -483,7 +494,7 @@ impl App {
                 container(text(initial.to_string()).size(15).font(bold()))
                     .center(38)
                     .style(style::glyph),
-                column![text(d.name.as_str()).font(bold()), info].spacing(2),
+                column![named(d.kind, Some(d.os), text(d.name.as_str()).font(bold())), info].spacing(2),
                 Space::new().width(Fill),
                 forget,
                 // Asking first: the row offers only the answer to the question.
@@ -564,9 +575,13 @@ impl App {
                 let action = forget_control(&d.name, d.id, self.confirm_forget == Some(d.id));
                 section = section.push(
                     container(
-                        row![text(d.name.as_str()).font(bold()), Space::new().width(Fill), action]
-                            .spacing(14)
-                            .align_y(Alignment::Center),
+                        row![
+                            named(d.kind, d.os, text(d.name.as_str()).font(bold())),
+                            Space::new().width(Fill),
+                            action
+                        ]
+                        .spacing(14)
+                        .align_y(Alignment::Center),
                     )
                     .padding([10, 16])
                     .width(Fill)
@@ -629,6 +644,33 @@ fn os_word(os: Os) -> &'static str {
         Os::Linux => "Linux",
         Os::Android => "Android TV",
     }
+}
+
+/// The side of an OS mark: about the cap height of the text beside it.
+const MARK: f32 = 13.0;
+
+/// A device's name with its OS mark before it. The OS is also named in a tooltip, so the mark is
+/// never the only carrier; with no OS known the mark's space stays, so names line up.
+fn named<'a>(kind: DeviceKind, os: Option<Os>, name: iced::widget::Text<'a>) -> Element<'a, Message> {
+    let mark: Element<'a, Message> = match Icon::of(kind, os) {
+        Some(icon) => {
+            let what = match (kind, os) {
+                (DeviceKind::Remote { .. }, _) => "Apple TV",
+                (_, Some(os)) => os_word(os),
+                (_, None) => "",
+            };
+            tooltip(
+                canvas(Logo(icon)).width(MARK).height(MARK),
+                container(text(what).size(12))
+                    .padding([3, 8])
+                    .style(container::rounded_box),
+                tooltip::Position::Bottom,
+            )
+            .into()
+        }
+        None => Space::new().width(MARK).height(MARK).into(),
+    };
+    row![mark, name].spacing(6).align_y(Alignment::Center).into()
 }
 
 /// A screen title: large and semibold.

@@ -10,6 +10,7 @@ mod diag;
 mod ext;
 mod form;
 mod host;
+mod icons;
 mod login;
 #[cfg(feature = "preview")]
 mod preview;
