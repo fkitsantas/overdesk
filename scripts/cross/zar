@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# zig's archiver for the C archives cc-rs builds: `lib` style for MSVC targets (cc-rs passes
+# -out:), `ar` style otherwise.
+case "$ZCC_TARGET" in *windows*) exec zig lib "$@" ;; *) exec zig ar "$@" ;; esac

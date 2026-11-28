@@ -1,0 +1,3 @@
+@bin bin/overdesk
+share/applications/org.overdesk.Overdesk.desktop
+share/icons/hicolor/256x256/apps/overdesk.png

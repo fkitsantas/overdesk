@@ -1,0 +1,6 @@
+Overdesk shares one keyboard and mouse across your Mac, Windows PC, Linux and
+BSD machines: move the pointer off the edge of one screen and it arrives on the
+next. The clipboard and files follow. Connections are mutual TLS 1.3 between
+paired devices; nothing goes through a server.
+
+On OpenBSD it runs in X11 sessions only.

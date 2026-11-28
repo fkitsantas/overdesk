@@ -1,0 +1,36 @@
+[package]
+name = "overdeskd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+overdesk-core = { path = "../overdesk-core" }
+overdesk-net = { path = "../overdesk-net" }
+overdesk-platform = { path = "../overdesk-platform" }
+overdesk-proto.workspace = true
+thiserror.workspace = true
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "sync", "time", "io-std", "io-util"] }
+
+# `image-data` is the clipboard image read/write that Pro uses; the open-core daemon never
+# shares images by itself. It pulls in the `image` crate with only the codecs the OS needs.
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+arboard = { version = "3.7.0", default-features = false, features = ["image-data"] }
+
+# Linux: `wayland-data-control` lets the clipboard work in Wayland sessions (wlroots, KDE).
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.arboard]
+version = "3.7.0"
+default-features = false
+features = ["image-data", "wayland-data-control"]
+
+[features]
+# Fake platforms (`overdeskd::testing`) for the tests of this crate and of crates built on it.
+testing = []
+
+[dev-dependencies]
+overdeskd = { path = ".", features = ["testing"] }
+
+[lints]
+workspace = true

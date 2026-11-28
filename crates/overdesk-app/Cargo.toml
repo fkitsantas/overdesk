@@ -1,0 +1,71 @@
+[package]
+name = "overdesk-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Overdesk desktop app"
+
+[[bin]]
+name = "overdesk"
+path = "src/main.rs"
+
+[dependencies]
+iced = { version = "0.14.0", features = ["tokio", "canvas", "advanced", "image"] }
+overdesk-proto.workspace = true
+overdeskd = { path = "../overdeskd" }
+tokio = { version = "1.54.1", features = ["sync", "time", "rt"] }
+png = "0.18.1"
+
+[target.'cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd")))'.dependencies]
+tray-icon = "0.27.0"
+
+# The BSDs write the XDG autostart file themselves (src/login.rs): the crate has no BSD backend.
+[target.'cfg(not(any(target_os = "freebsd", target_os = "openbsd")))'.dependencies]
+auto-launch = "0.6.0"
+
+# Linux uses the StatusNotifierItem (D-Bus) backend: its own worker thread, no GTK and no
+# libayatana-appindicator, so it fits an iced/winit main loop and the AppImage needs no GTK.
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies]
+zbus = "6.5"
+tray-icon = { version = "0.27.0", default-features = false, features = ["ksni"] }
+
+[target.'cfg(windows)'.dependencies]
+overdesk-platform = { path = "../overdesk-platform" }
+
+[features]
+# Design review only: renders a fixed state, saves a screenshot, exits. Never shipped.
+preview = []
+
+[lints]
+workspace = true
+
+# .rpm for Fedora, openSUSE and the RHEL family: `cargo generate-rpm -p overdesk-app` (run by scripts/package.sh).
+# Paths are relative to the workspace root. The window-system libraries are dlopen()ed, so they are
+# required by soname (resolves on every rpm distro) rather than by package name (which differs on openSUSE).
+[package.metadata.generate-rpm]
+name = "overdesk"
+summary = "Overdesk"
+assets = [
+  { source = "target/release/overdesk", dest = "/usr/bin/overdesk", mode = "755" },
+  { source = "crates/overdesk-app/linux/org.overdesk.Overdesk.desktop", dest = "/usr/share/applications/org.overdesk.Overdesk.desktop", mode = "644" },
+  { source = "assets/brand/icons/app-icon-32.png", dest = "/usr/share/icons/hicolor/32x32/apps/overdesk.png", mode = "644" },
+  { source = "assets/brand/icons/app-icon-128.png", dest = "/usr/share/icons/hicolor/128x128/apps/overdesk.png", mode = "644" },
+  { source = "assets/brand/icons/app-icon-256.png", dest = "/usr/share/icons/hicolor/256x256/apps/overdesk.png", mode = "644" },
+  { source = "assets/brand/icons/app-icon-512.png", dest = "/usr/share/icons/hicolor/512x512/apps/overdesk.png", mode = "644" },
+  { source = "LICENSE", dest = "/usr/share/licenses/overdesk/LICENSE", mode = "644", doc = false },
+]
+
+[package.metadata.generate-rpm.requires]
+"libxkbcommon.so.0()(64bit)" = "*"
+"libxkbcommon-x11.so.0()(64bit)" = "*"
+"libX11.so.6()(64bit)" = "*"
+"libX11-xcb.so.1()(64bit)" = "*"
+"libXcursor.so.1()(64bit)" = "*"
+"libXrandr.so.2()(64bit)" = "*"
+"libXi.so.6()(64bit)" = "*"
+"libwayland-client.so.0()(64bit)" = "*"
+"libwayland-cursor.so.0()(64bit)" = "*"
+"libwayland-egl.so.1()(64bit)" = "*"
+"libEGL.so.1()(64bit)" = "*"

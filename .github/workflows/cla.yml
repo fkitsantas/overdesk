@@ -1,0 +1,25 @@
+name: CLA
+
+# Manual only while the repository is private (no outside contributors yet).
+# Restore the issue_comment / pull_request_target triggers when the repo goes public.
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  cla:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-signatures: signatures/cla.json
+          path-to-document: https://github.com/fkitsantas/overdesk/blob/main/CLA.md
+          branch: cla-signatures
+          allowlist: fkitsantas,dependabot[bot]

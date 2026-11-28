@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="224 394 576 252">
+<defs>
+<linearGradient id="stroke" gradientUnits="userSpaceOnUse" x1="230" y1="0" x2="794" y2="0">
+  <stop offset="0" stop-color="#7A3FF2"/><stop offset="0.5" stop-color="#6A5CFF"/><stop offset="1" stop-color="#2F7BFF"/>
+</linearGradient>
+<linearGradient id="ribbonc" gradientUnits="userSpaceOnUse" x1="360" y1="0" x2="676" y2="0">
+  <stop offset="0" stop-color="#7A3FF2"/><stop offset="1" stop-color="#6A5CFF" stop-opacity="0.15"/>
+</linearGradient>
+</defs>
+<rect x="250" y="420" width="240" height="180" rx="44" fill="none" stroke="url(#stroke)" stroke-width="34"/>
+<rect x="534" y="420" width="240" height="180" rx="44" fill="none" stroke="url(#stroke)" stroke-width="34"/>
+<path d="M360 584C440 584 476 566 512 542C556 512 600 494 676 488L676 508C616 512 576 528 540 554C496 586 456 616 360 616Z" fill="url(#ribbonc)"/>
+</svg>

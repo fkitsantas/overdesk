@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Overdesk
+Comment=Control your other computers from this one.
+Exec=overdesk
+Icon=overdesk
+Terminal=false
+Categories=Utility;

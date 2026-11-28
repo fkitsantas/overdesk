@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# zig as a C compiler for one cross target, named by $ZCC_TARGET. cc-rs passes its own
+# Rust-style --target, which zig can't parse, so it is dropped.
+args=()
+for a in "$@"; do case "$a" in --target=*) ;; *) args+=("$a") ;; esac; done
+exec zig cc -target "$ZCC_TARGET" "${args[@]}"

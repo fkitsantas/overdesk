@@ -1,0 +1,73 @@
+{
+  "productName": "Overdesk",
+  "identifier": "org.overdesk.Overdesk",
+  "category": "Utility",
+  "outDir": "../../target/packages",
+  "binariesDir": "../../target/release",
+  "binaries": [
+    {
+      "path": "overdesk",
+      "main": true
+    }
+  ],
+  "icons": [
+    "../../assets/brand/icons/app-icon-32.png",
+    "../../assets/brand/icons/app-icon-128.png",
+    "../../assets/brand/icons/app-icon-256.png",
+    "../../assets/brand/icons/app-icon-512.png",
+    "../../assets/brand/icons/app-icon-512@2x.png"
+  ],
+  "macos": {
+    "minimumSystemVersion": "11.0",
+    "infoPlistPath": "macos/Info.plist",
+    "signingIdentity": "-"
+  },
+  "nsis": {
+    "installMode": "currentUser"
+  },
+  "deb": {
+    "depends": [
+      "libxkbcommon0",
+      "libxkbcommon-x11-0",
+      "libx11-6",
+      "libx11-xcb1",
+      "libxcursor1",
+      "libxrandr2",
+      "libxi6",
+      "libwayland-client0",
+      "libwayland-cursor0",
+      "libwayland-egl1",
+      "libvulkan1 | libgl1",
+      "libegl1"
+    ],
+    "section": "utils"
+  },
+  "pacman": {
+    "depends": [
+      "libxkbcommon",
+      "libxkbcommon-x11",
+      "libx11",
+      "libxcursor",
+      "libxrandr",
+      "libxi",
+      "wayland",
+      "libglvnd",
+      "vulkan-icd-loader"
+    ]
+  },
+  "appimage": {
+    "libs": [
+      "'libxkbcommon.so*'",
+      "'libxkbcommon-x11.so*'",
+      "'libX11.so*'",
+      "'libX11-xcb.so*'",
+      "'libXcursor.so*'",
+      "'libXrandr.so*'",
+      "'libXi.so*'",
+      "'libwayland-client.so*'",
+      "'libwayland-cursor.so*'",
+      "'libwayland-egl.so*'"
+    ]
+  },
+  "description": "Control your other computers from this one."
+}

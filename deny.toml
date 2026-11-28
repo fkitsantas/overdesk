@@ -1,0 +1,25 @@
+# Only licenses that may be combined into an AGPL-3.0 work (and offered commercially).
+[licenses]
+allow = [
+    "AGPL-3.0-only",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0", # Boost: permissive, used by iced's text stack
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "NCSA", # permissive (LLVM-style), via iced
+    "Zlib", # permissive, via iced/winit
+    "Unicode-3.0",
+    "Unlicense", # ksni (Linux tray): public-domain dedication, FSF-approved, AGPL-compatible
+]
+
+[bans]
+multiple-versions = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

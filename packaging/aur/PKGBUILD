@@ -1,0 +1,36 @@
+# Maintainer: Overdesk <support at overdesk dot org>
+# Builds the Free (open core) app from the tagged source. The official build with Pro is `overdesk-bin`.
+pkgname=overdesk
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Control your other computers from this one'
+arch=('x86_64')
+url='https://overdesk.org'
+license=('AGPL-3.0-only')
+# The window-system libraries are dlopen()ed at run time, so they are real dependencies even though ldd does not list them.
+depends=('glibc' 'gcc-libs' 'libxkbcommon' 'libxkbcommon-x11' 'libx11' 'libxcursor' 'libxrandr' 'libxi' 'wayland' 'libglvnd' 'vulkan-icd-loader')
+makedepends=('rust' 'cargo')
+options=('!lto')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/fkitsantas/overdesk/archive/refs/tags/v$pkgver.tar.gz")
+# Replace with the real sum before publishing: `updpkgsums`.
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  CARGO_TARGET_DIR=target cargo build --frozen --release -p overdesk-app
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 target/release/overdesk "$pkgdir/usr/bin/overdesk"
+  install -Dm644 crates/overdesk-app/linux/org.overdesk.Overdesk.desktop "$pkgdir/usr/share/applications/org.overdesk.Overdesk.desktop"
+  for size in 32 128 256 512; do
+    install -Dm644 "assets/brand/icons/app-icon-$size.png" "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/overdesk.png"
+  done
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
