@@ -35,7 +35,8 @@ pub fn is_packaged(exe: &Path, local_app_data: Option<&Path>, appimage: Option<&
         let programs = format!("{}/programs/", dir.to_string_lossy().to_lowercase().replace('\\', "/"));
         lower.starts_with(&programs)
     });
-    let installed_linux = appimage.is_some_and(Path::is_absolute)
+    // has_root, not is_absolute: the same `/...` AppImage path counts on every OS (Windows calls it relative without a drive).
+    let installed_linux = appimage.is_some_and(Path::has_root)
         || ["/usr/bin/", "/usr/local/bin/", "/opt/"]
             .iter()
             .any(|d| lower.starts_with(d));
@@ -45,7 +46,7 @@ pub fn is_packaged(exe: &Path, local_app_data: Option<&Path>, appimage: Option<&
 /// What to register for login: the AppImage file itself when running from one (the
 /// executable is then inside a temporary mount that vanishes on exit), else `exe`.
 fn launch_path<'a>(exe: &'a Path, appimage: Option<&'a Path>) -> &'a Path {
-    appimage.filter(|a| a.is_absolute()).unwrap_or(exe)
+    appimage.filter(|a| a.has_root()).unwrap_or(exe)
 }
 
 /// The XDG autostart file's text. `Exec` quotes the path, so spaces and `%` survive.
