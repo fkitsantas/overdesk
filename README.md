@@ -134,6 +134,8 @@ Builds from source update by rebuilding.
 | 8c | Full code, performance and security review of every crate, with every finding fixed: lower input latency, hardened pairing and transfers, no stuck keys on disconnect | ✅ Done |
 | 8d | Architecture pass to a senior standard: typed errors and connection close reasons (a peer's text is never shown), one lock policy, every large file split by job, pairing and trust logic shared with Pro | ✅ Done |
 | 9 | **Apple TV** (Pro): a screen on the Desk; push the cursor onto it and your keyboard and mouse are its remote. The open core only carries the generic bits (remote devices in the nearby list, a PIN prompt, `Store::save_secret`) | 🧪 Built; tested against a fake TV, real-TV test pending |
+| 9b | VPNs: discovery ignores VPN tunnels and prefers the shared local network, reconnects as soon as the network changes, and a hint when a VPN blocks the local network | 🧪 Built; hand test pending ([VPN tests](docs/HAND-TESTS.md)) |
+| 10 | Keep connections on the local network card when a VPN routes the local network into its tunnel (binding the QUIC socket to the physical interface) | ❓ To be decided after the Windows corporate VPN test |
 
 ## 🏗️ Architecture
 

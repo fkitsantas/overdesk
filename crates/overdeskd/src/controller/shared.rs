@@ -13,7 +13,7 @@ use overdesk_net::session::Me;
 use overdesk_net::sync::Relock;
 use overdesk_net::transport::{Closer, NetError};
 use overdesk_proto::PeerId;
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tokio::time::Instant;
 
 use super::model::{AppState, Phase, ScreenView};
@@ -33,6 +33,8 @@ pub(super) struct Shared<P> {
     pub(super) left: Mutex<BTreeSet<PeerId>>,
     /// Earliest time an automatic dial to a peer may be retried after a failure.
     pub(super) retry_after: Mutex<BTreeMap<PeerId, Instant>>,
+    /// Woken when this computer's network addresses changed, to redial at once.
+    pub(super) network: Notify,
     /// Publishes [`AppState`] to the UI.
     pub(super) state: watch::Sender<AppState>,
     /// The pinned peers, and the trust generation.
@@ -53,6 +55,10 @@ pub(super) struct Shared<P> {
     pub(super) admit: Option<Arc<dyn Admit>>,
     /// Whether the user was already told that a small file could not be saved.
     pub(super) save_warned: AtomicBool,
+    /// Whether the user was already told about a VPN since a session last connected.
+    pub(super) vpn_warned: AtomicBool,
+    /// Whether a VPN is up now (a field so tests decide it).
+    pub(super) vpn: fn() -> bool,
     /// The OS adapter that captures and injects input.
     pub(super) platform: P,
 }

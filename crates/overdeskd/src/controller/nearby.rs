@@ -44,6 +44,8 @@ pub fn apply(found: &mut BTreeMap<PeerId, Nearby>, change: Change) {
         Change::Lost(id) => {
             found.remove(&id);
         }
+        // Not about a device; the controller reacts to it by redialing.
+        Change::NetworkChanged => {}
     }
 }
 

@@ -22,7 +22,7 @@ use overdesk_net::store::Store;
 use overdesk_net::sync::Relock;
 use overdesk_net::transport::{CloseReason, Link, Node};
 use overdesk_proto::PeerId;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
@@ -34,7 +34,7 @@ use persist::{load_names, load_side};
 use shared::Shared;
 use trust::{Direction, PairingWindow, PinBook};
 
-pub use dial::session_me;
+pub use dial::{VPN_HINT, session_me};
 pub use model::{
     AppState, Command, Config, DeviceKind, FileOffer, NearbyDevice, PAIRING_WINDOW, PairedDevice, PeerView, Phase,
     Placement, ScreenView, Side, StartError, UnknownSide, ends_attempt,
@@ -69,11 +69,14 @@ pub async fn spawn<P: Platform + Clone + Sync>(
         closer: Mutex::new(None),
         left: Mutex::new(BTreeSet::new()),
         retry_after: Mutex::new(BTreeMap::new()),
+        network: Notify::new(),
         book: PinBook::new(config.store_dir.clone(), Arc::new(store)),
         names: Mutex::new(load_names(&config.store_dir)),
         window: PairingWindow::default(),
         generation: AtomicU64::new(0),
         save_warned: AtomicBool::new(false),
+        vpn_warned: AtomicBool::new(false),
+        vpn: overdesk_net::discovery::vpn_active,
         found: Mutex::new(BTreeMap::new()),
         me: config.me,
         admit: config.admit,
@@ -91,6 +94,10 @@ pub async fn spawn<P: Platform + Clone + Sync>(
         // Ends when the browser drops with the controller and closes the channel.
         std::thread::spawn(move || {
             while let Ok(change) = changes.recv() {
+                if change == Change::NetworkChanged {
+                    shared.network.notify_one();
+                    continue;
+                }
                 if let Change::Lost(id) = &change {
                     // Gone from the network: a later reappearance is a fresh start.
                     shared.left.relock().remove(id);
@@ -169,6 +176,14 @@ impl<P: Platform + Clone + Sync> Supervisor<P> {
             let auto = Auto { peer: t.id, restore };
             self.active = Some(dial(&self.node, &self.shared, t.address, side, Some(t.id), Some(auto)));
         }
+    }
+
+    /// This computer's addresses changed: old failures say nothing about the new network, so
+    /// forget the backoff and look for a device to dial now. A live session is left alone
+    /// (`auto_dial` does nothing while connected or busy).
+    fn network_changed(&mut self, my_id: PeerId) {
+        self.shared.retry_after.relock().clear();
+        self.auto_dial(my_id);
     }
 
     /// Carries out one UI command.
@@ -284,6 +299,7 @@ async fn control<P: Platform + Clone + Sync>(
         tokio::select! {
             _ = tick.tick(), if !connected => ctl.auto_dial(my_id),
             Ok(()) = phase.changed() => {}
+            () = ctl.shared.network.notified() => ctl.network_changed(my_id),
             cmd = commands.recv() => match cmd {
                 None => break,
                 Some(cmd) => ctl.command(cmd),
@@ -407,6 +423,7 @@ mod tests {
     use overdesk_core::engine::Mode;
     use overdesk_net::transport::NetError;
     use overdesk_proto::Os;
+    use std::sync::atomic::Ordering;
 
     use super::model::{DeviceKind, PeerView};
 
@@ -461,9 +478,12 @@ mod tests {
             closer: Mutex::new(None),
             left: Mutex::new(BTreeSet::new()),
             retry_after: Mutex::new(BTreeMap::new()),
+            network: Notify::new(),
             window: PairingWindow::default(),
             generation: AtomicU64::new(0),
             save_warned: AtomicBool::new(false),
+            vpn_warned: AtomicBool::new(false),
+            vpn: || false,
             found: Mutex::new(BTreeMap::new()),
             me: crate::Me {
                 name: "me".into(),
@@ -519,6 +539,115 @@ mod tests {
                 assert_eq!(rx.borrow().phase, Phase::Idle, "the old attempt can no longer write");
             }
         }
+    }
+
+    /// A supervisor with a paired, nearby `OTHER` (the higher id, so this device dials) that is
+    /// backing off for an hour, in `phase`; `name` keeps parallel tests' folders apart.
+    fn backing_off(name: &str, phase: Phase) -> (Supervisor<Silent>, watch::Receiver<AppState>) {
+        let (shared, rx) = shared(name);
+        let peer = NearbyDevice {
+            kind: DeviceKind::Computer,
+            name: "peer".into(),
+            os: Os::Linux,
+            address: "127.0.0.1:9".parse().unwrap(),
+            id: OTHER,
+            paired: true,
+        };
+        shared.state.send_modify(|s| {
+            s.phase = phase;
+            s.nearby = vec![peer];
+        });
+        shared
+            .retry_after
+            .relock()
+            .insert(OTHER, Instant::now() + Duration::from_secs(3600));
+        let node = Node::bind(
+            &overdesk_net::transport::Identity::generate().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .unwrap();
+        let sup = Supervisor {
+            node: Arc::new(node),
+            shared: Arc::new(shared),
+            active: None,
+            suppressed: false,
+            aimed: None,
+        };
+        (sup, rx)
+    }
+
+    #[tokio::test]
+    async fn a_network_change_ends_the_backoff_and_redials_at_once() {
+        let (mut sup, rx) = backing_off("redial", Phase::Idle);
+        sup.auto_dial(ME);
+        assert!(!sup.busy(), "still backing off");
+        sup.network_changed(ME);
+        assert!(sup.shared.retry_after.relock().is_empty());
+        assert!(sup.busy(), "dialing without waiting for the tick");
+        assert!(matches!(rx.borrow().phase, Phase::Connecting { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_network_change_never_touches_a_live_session() {
+        let (mut sup, rx) = backing_off("live", connected_to(OTHER));
+        sup.network_changed(ME);
+        assert!(!sup.busy());
+        assert_eq!(rx.borrow().phase, connected_to(OTHER));
+    }
+
+    #[tokio::test]
+    async fn a_network_change_does_not_override_a_manual_disconnect() {
+        let (mut sup, _rx) = backing_off("manual", Phase::Idle);
+        sup.suppressed = true;
+        sup.network_changed(ME);
+        assert!(!sup.busy());
+    }
+
+    /// A failed dial to `OTHER`, automatic or manual, with a VPN up or not.
+    async fn failed_dial(shared: &Arc<Shared<Silent>>, auto: bool) {
+        let auto = auto.then_some(Auto {
+            peer: OTHER,
+            restore: Phase::Idle,
+        });
+        let dial = Dial::new(shared.clone(), shared.begin(Phase::Idle), auto);
+        dial.run(
+            Err(NetError::Io("down".into())),
+            Side::Right,
+            Direction::Outbound,
+            Some(OTHER),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_vpn_hint_is_shown_once_for_automatic_dials_until_a_session_connects() {
+        let (mut sh, rx) = shared("vpn-auto");
+        sh.vpn = || true;
+        let sh = Arc::new(sh);
+        failed_dial(&sh, true).await;
+        assert_eq!(rx.borrow().notice.as_deref(), Some(VPN_HINT));
+        sh.state.send_modify(|s| s.notice = None);
+        failed_dial(&sh, true).await;
+        assert_eq!(rx.borrow().notice, None, "not again after the user dismissed it");
+        sh.vpn_warned.store(false, Ordering::SeqCst); // what a connected session does
+        failed_dial(&sh, true).await;
+        assert_eq!(rx.borrow().notice.as_deref(), Some(VPN_HINT));
+    }
+
+    #[tokio::test]
+    async fn a_vpn_hint_ends_a_manual_error_and_never_shows_without_a_vpn() {
+        let (mut sh, rx) = shared("vpn-manual");
+        sh.vpn = || true;
+        let sh = Arc::new(sh);
+        failed_dial(&sh, false).await;
+        assert!(matches!(&rx.borrow().phase, Phase::Error(m) if m.ends_with(VPN_HINT)));
+        assert_eq!(rx.borrow().notice, None);
+        let (sh, rx) = shared("no-vpn");
+        let sh = Arc::new(sh);
+        failed_dial(&sh, true).await;
+        failed_dial(&sh, false).await;
+        assert_eq!(rx.borrow().notice, None);
+        assert!(matches!(&rx.borrow().phase, Phase::Error(m) if !m.contains("VPN")));
     }
 
     #[tokio::test]

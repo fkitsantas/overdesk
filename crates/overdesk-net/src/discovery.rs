@@ -6,7 +6,7 @@
 //! as [`Change`] events. Everything read from the network is untrusted: `parse` validates
 //! it and silently drops anything malformed.
 
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use mdns_sd::{DaemonEvent, IfKind, IfPredicate, ServiceDaemon, ServiceEvent, ServiceInfo};
 use overdesk_proto::{Os, PROTOCOL_VERSION, PeerId};
 use std::{
     net::{IpAddr, SocketAddr},
@@ -35,8 +35,8 @@ pub struct Nearby {
     pub name: String,
     /// Operating system the device runs.
     pub os: Os,
-    /// Where to dial it: a routable IPv4 address if it has one, else routable IPv6, then
-    /// link-local ones.
+    /// Where to dial it: an address on a subnet of one of our own non-tunnel interfaces if it
+    /// has one, else a routable IPv4 address, then routable IPv6, then link-local ones.
     pub address: SocketAddr,
     /// Whether it announces Overdesk Pro (TXT `pro=1`). Unauthenticated, like the rest of the
     /// announcement: it only chooses how the Desk is shared, never whom to trust.
@@ -50,6 +50,9 @@ pub enum Change {
     Found(Nearby),
     /// A device went away.
     Lost(PeerId),
+    /// An address of this computer was added or removed (Wi-Fi joined, cable plugged, VPN
+    /// switched): worth redialing at once. Tunnel interfaces never raise it.
+    NetworkChanged,
 }
 
 /// TXT value for an [`Os`].
@@ -80,6 +83,107 @@ fn is_link_local(ip: &IpAddr) -> bool {
         IpAddr::V4(a) => a.is_link_local(),
         IpAddr::V6(a) => a.segments()[0] & 0xffc0 == 0xfe80,
     }
+}
+
+/// Name prefixes of tunnel interfaces: macOS `utun`, Linux `tun`/`tap`/`wg`/`ppp`/`ipsec`/`zt`
+/// (ZeroTier), GlobalProtect `gpd`, and the Windows friendly names of the common VPN adapters.
+const TUNNEL_PREFIXES: [&str; 12] = [
+    "utun",
+    "tun",
+    "tap",
+    "wg",
+    "ppp",
+    "ipsec",
+    "tailscale",
+    "zt",
+    "gpd",
+    "wintun",
+    "nordlynx",
+    "pangp",
+];
+
+/// Whether an interface called `name` looks like a VPN tunnel: its address is not on the LAN.
+fn tunnel_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    TUNNEL_PREFIXES.iter().any(|p| n.starts_with(p)) || ["vpn", "wireguard", "anyconnect"].iter().any(|k| n.contains(k))
+}
+
+/// Whether `i` is a tunnel: the OS says point-to-point (macOS/Linux flag, Windows PPP and tunnel
+/// types), else by name.
+///
+/// shortcut: Windows WireGuard, Tailscale and OpenVPN adapters are plain Ethernet-type to the OS and
+/// if-addrs exposes only the user-renamable friendly name, so a renamed one is missed (the
+/// same-subnet rule in [`on_our_lan`] still avoids dialing it); upgrade by reading the adapter
+/// description through the Windows IP Helper API.
+fn is_tunnel(i: &if_addrs::Interface) -> bool {
+    i.is_p2p() || tunnel_name(&i.name)
+}
+
+/// Keeps tunnels out of `daemon`: not announced on, not listened on, and so not reported as a
+/// network change. A selection, so a tunnel that appears later is excluded too.
+fn without_tunnels(daemon: &ServiceDaemon) -> Result<(), DiscoveryError> {
+    daemon.disable_interface(IfKind::Predicate(IfPredicate::new(is_tunnel)))?;
+    Ok(())
+}
+
+/// An address and prefix length of one of our own LAN interfaces.
+type Subnet = (IpAddr, u8);
+
+/// Our own non-tunnel interface subnets right now; empty when they cannot be read.
+fn own_subnets() -> Vec<Subnet> {
+    if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .iter()
+        .filter(|i| i.is_oper_up() && !i.is_loopback() && !is_tunnel(i))
+        .map(|i| match &i.addr {
+            if_addrs::IfAddr::V4(a) => (IpAddr::V4(a.ip), a.prefixlen),
+            if_addrs::IfAddr::V6(a) => (IpAddr::V6(a.ip), a.prefixlen),
+        })
+        .collect()
+}
+
+/// Whether `a` and `b` share their first `prefix` bits (same family only; IPv6 link-local never
+/// counts, as every link has the same fe80::/64).
+fn same_subnet(a: IpAddr, (b, prefix): Subnet) -> bool {
+    let bits = |ip: IpAddr| match ip {
+        IpAddr::V4(v) => (u128::from(u32::from(v)), 32u8),
+        IpAddr::V6(v) => (u128::from(v), 128u8),
+    };
+    let ((x, width), (y, other)) = (bits(a), bits(b));
+    let prefix = prefix.min(width);
+    width == other && !is_link_local(&a) && (x ^ y).checked_shr(u32::from(width - prefix)).unwrap_or(0) == 0
+}
+
+/// Whether an interface with these properties is a live VPN: a tunnel that is up and holds a
+/// routable-looking IPv4 address. Why IPv4: macOS always has idle utun0..utun7 with only fe80
+/// addresses, and a real VPN tunnel gets an IPv4 (only the VPN's utun8 had `10.1.0.4` here).
+///
+/// shortcut: IPv6-only VPNs are missed, upgrade when one is reported.
+fn is_vpn(tunnel: bool, up: bool, addrs: &[IpAddr]) -> bool {
+    tunnel
+        && up
+        && addrs
+            .iter()
+            .any(|a| a.is_ipv4() && !a.is_loopback() && !is_link_local(a))
+}
+
+/// Whether a VPN tunnel is up on this computer now; `false` when the interfaces cannot be read.
+pub fn vpn_active() -> bool {
+    if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .iter()
+        .any(|i| is_vpn(is_tunnel(i), i.is_oper_up(), &[i.ip()]))
+}
+
+/// The addresses of `addrs` that are on a subnet of `own` (a tunnel address never is), or all of
+/// them when none is: the announcing device may be reached on our LAN only by one of them.
+fn on_our_lan(addrs: &[IpAddr], own: &[Subnet]) -> Vec<IpAddr> {
+    let near: Vec<IpAddr> = addrs
+        .iter()
+        .copied()
+        .filter(|a| own.iter().any(|s| same_subnet(*a, *s)))
+        .collect();
+    if near.is_empty() { addrs.to_vec() } else { near }
 }
 
 /// The address to dial: routable IPv4, then routable IPv6, then link-local IPv4, then
@@ -165,9 +269,9 @@ impl Advertiser {
         let info = ServiceInfo::new(SERVICE, &hex, &format!("{hex}.local."), "", port, &txt[..])?.enable_addr_auto();
         let fullname = info.get_fullname().to_owned();
         let daemon = ServiceDaemon::new()?;
-        if let Err(e) = daemon.register(info) {
+        if let Err(e) = without_tunnels(&daemon).and_then(|()| daemon.register(info).map_err(Into::into)) {
             let _ = daemon.shutdown(); // else the daemon thread outlives the failed start
-            return Err(e.into());
+            return Err(e);
         }
         Ok(Self { daemon, fullname })
     }
@@ -193,15 +297,31 @@ impl Browser {
     /// are reported on the returned channel; the channel closes when the `Browser` drops.
     pub fn start(own_id: PeerId) -> Result<(Self, mpsc::Receiver<Change>), DiscoveryError> {
         let daemon = ServiceDaemon::new()?;
-        let events = match daemon.browse(SERVICE) {
+        let started = without_tunnels(&daemon).and_then(|()| {
+            let events = daemon.browse(SERVICE)?;
+            Ok((events, daemon.monitor()?))
+        });
+        let (events, monitor) = match started {
             Ok(e) => e,
             Err(e) => {
                 let _ = daemon.shutdown();
-                return Err(e.into());
+                return Err(e);
             }
         };
         // Bounded: a flood of announcements must not grow memory while the UI is slow.
         let (tx, rx) = mpsc::sync_channel(EVENT_QUEUE);
+        // The daemon rescans interfaces itself (every 5 s); this blocks, so it costs no polling.
+        // It ends when the daemon shuts down and closes `monitor`.
+        let net_tx = tx.clone();
+        std::thread::spawn(move || {
+            while let Ok(event) = monitor.recv() {
+                if matches!(event, DaemonEvent::IpAdd(_) | DaemonEvent::IpDel(_))
+                    && !forward(&net_tx, Change::NetworkChanged)
+                {
+                    break; // receiver dropped
+                }
+            }
+        });
         std::thread::spawn(move || {
             while let Ok(event) = events.recv() {
                 let change = match event {
@@ -209,7 +329,7 @@ impl Browser {
                         let txt: Vec<(&str, &str)> =
                             svc.txt_properties.iter().map(|p| (p.key(), p.val_str())).collect();
                         let addrs: Vec<IpAddr> = svc.addresses.iter().map(|a| a.to_ip_addr()).collect();
-                        parse(&txt, &addrs, svc.port)
+                        parse(&txt, &on_our_lan(&addrs, &own_subnets()), svc.port)
                             .filter(|n| n.id != own_id)
                             .map(Change::Found)
                     }
@@ -234,8 +354,11 @@ impl Browser {
 /// Passes `change` on; `false` once the receiver is gone.
 fn forward(tx: &mpsc::SyncSender<Change>, change: Change) -> bool {
     match change {
-        // A full queue drops a sighting; the next announcement refreshes the entry.
-        Change::Found(_) => !matches!(tx.try_send(change), Err(mpsc::TrySendError::Disconnected(_))),
+        // A full queue drops a sighting; the next announcement refreshes the entry. A dropped
+        // network change leaves others queued, which the consumer answers the same way.
+        Change::Found(_) | Change::NetworkChanged => {
+            !matches!(tx.try_send(change), Err(mpsc::TrySendError::Disconnected(_)))
+        }
         // A removal is announced once, so it waits for room instead of being lost.
         Change::Lost(_) => tx.send(change).is_ok(),
     }
@@ -414,8 +537,102 @@ mod tests {
                     );
                     break;
                 }
-                Change::Lost(_) => {}
+                Change::Lost(_) | Change::NetworkChanged => {}
             }
+        }
+    }
+
+    fn lan() -> Vec<Subnet> {
+        vec![
+            (IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20)), 24),
+            (IpAddr::V6("2001:db8:1::5".parse().unwrap()), 64),
+        ]
+    }
+
+    #[test]
+    fn a_tunnel_address_loses_to_one_on_our_lan() {
+        let tunnel = IpAddr::V4(Ipv4Addr::new(10, 8, 0, 3));
+        assert_eq!(on_our_lan(&[tunnel, V4], &lan()), vec![V4]);
+        assert_eq!(
+            parse(&good(), &on_our_lan(&[tunnel, V4], &lan()), 9)
+                .unwrap()
+                .address
+                .ip(),
+            V4
+        );
+    }
+
+    #[test]
+    fn without_a_shared_subnet_every_address_stays_for_the_usual_order() {
+        let (a, b) = (
+            IpAddr::V4(Ipv4Addr::new(10, 8, 0, 3)),
+            IpAddr::V4(Ipv4Addr::new(100, 64, 0, 9)),
+        );
+        assert_eq!(on_our_lan(&[a, b], &lan()), vec![a, b]);
+        assert_eq!(on_our_lan(&[a, b], &[]), vec![a, b], "interfaces unreadable");
+        assert_eq!(on_our_lan(&[V6, a], &lan()), vec![V6, a]);
+    }
+
+    #[test]
+    fn ipv6_prefix_matches_but_link_local_and_other_families_never_do() {
+        let near = IpAddr::V6("2001:db8:1::99".parse().unwrap());
+        let far = IpAddr::V6("2001:db8:2::99".parse().unwrap());
+        let ll = IpAddr::V6("fe80::1".parse().unwrap());
+        assert_eq!(on_our_lan(&[far, near], &lan()), vec![near]);
+        assert_eq!(
+            on_our_lan(&[far, ll], &[(ll, 64)]),
+            vec![far, ll],
+            "fe80 is on every link"
+        );
+        assert!(!same_subnet(near, (IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0)));
+        assert!(same_subnet(V4, (V4, 32)) && same_subnet(V4, (V4, 0)));
+        // A /0 on IPv6 shifts by the whole width, which must not panic.
+        assert!(same_subnet(near, (far, 0)));
+    }
+
+    #[test]
+    fn a_vpn_is_an_up_tunnel_with_a_real_ipv4_address() {
+        let v4 = IpAddr::V4(Ipv4Addr::new(10, 1, 0, 4));
+        let ll4 = IpAddr::V4(Ipv4Addr::new(169, 254, 1, 1));
+        let ll6 = IpAddr::V6("fe80::1".parse().unwrap());
+        assert!(is_vpn(true, true, &[ll6, v4]));
+        assert!(!is_vpn(true, true, &[ll6, ll4]), "idle utun");
+        assert!(!is_vpn(true, true, &[IpAddr::V4(Ipv4Addr::LOCALHOST)]));
+        assert!(!is_vpn(true, true, &[]));
+        assert!(!is_vpn(true, false, &[v4]), "down");
+        assert!(!is_vpn(false, true, &[v4]), "not a tunnel");
+    }
+
+    #[test]
+    fn same_subnet_lan_beats_a_routable_tunnel_even_against_ipv4_preference() {
+        let tunnel = IpAddr::V4(Ipv4Addr::new(100, 64, 0, 9));
+        let v6 = IpAddr::V6("2001:db8:1::99".parse().unwrap());
+        let picked = parse(&good(), &on_our_lan(&[tunnel, v6], &lan()), 9).unwrap();
+        assert_eq!(picked.address.ip(), v6);
+    }
+
+    #[test]
+    fn vpn_adapters_are_recognised_by_name() {
+        for t in [
+            "utun4",
+            "tun0",
+            "tap0",
+            "wg0",
+            "ppp0",
+            "ipsec0",
+            "tailscale0",
+            "zt5u4",
+            "gpd0",
+            "WireGuard Tunnel",
+            "ProtonVPN",
+            "NordLynx",
+        ] {
+            assert!(tunnel_name(t), "{t}");
+        }
+        for l in [
+            "en0", "eth0", "wlan0", "wlp3s0", "Ethernet", "Wi-Fi", "bridge0", "docker0",
+        ] {
+            assert!(!tunnel_name(l), "{l}");
         }
     }
 

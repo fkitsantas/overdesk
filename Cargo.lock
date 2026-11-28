@@ -3675,6 +3675,7 @@ dependencies = [
 name = "overdesk-net"
 version = "0.1.0"
 dependencies = [
+ "if-addrs",
  "mdns-sd",
  "overdesk-proto",
  "quinn",

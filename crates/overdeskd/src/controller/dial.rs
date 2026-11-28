@@ -25,6 +25,10 @@ const RETRY_AFTER: Duration = Duration::from_secs(5);
 /// How long after an automatic dial reached the wrong device (stale or spoofed mDNS).
 const RETRY_AFTER_UNEXPECTED: Duration = Duration::from_secs(60);
 
+/// What the user reads when a VPN is up and a computer cannot be reached.
+pub const VPN_HINT: &str =
+    "Your VPN may be blocking your local network. Turn on Allow LAN access (or Local network sharing) in your VPN app.";
+
 /// An automatic dial's context: who it targets and the phase to return to if it fails,
 /// so a failed attempt never leaves an error screen.
 pub(super) struct Auto {
@@ -112,6 +116,24 @@ impl<P: Platform + Clone + Sync> Dial<P> {
         }
     }
 
+    /// [`Dial::fail`] for a computer that could not be reached, adding [`VPN_HINT`] while a VPN is up:
+    /// to a manual dial's error, and once (until a session connects) as a notice for an automatic one.
+    fn unreachable(&self, msg: String, wait: Duration) {
+        let shared = &self.shared;
+        let vpn = (shared.vpn)();
+        if vpn && self.auto.is_some() && !shared.vpn_warned.swap(true, Ordering::SeqCst) {
+            shared.notify(VPN_HINT.to_owned());
+        }
+        self.fail(
+            if vpn && self.auto.is_none() {
+                format!("{msg} {VPN_HINT}")
+            } else {
+                msg
+            },
+            wait,
+        );
+    }
+
     /// Pairs if needed, establishes the Desk, runs until the peer is lost.
     /// `Inbound` connections from unknown devices pair only while pairing is open. A dial with
     /// `expect` set connects only to a pinned peer with that id and never falls back to
@@ -128,7 +150,7 @@ impl<P: Platform + Clone + Sync> Dial<P> {
             Ok(l) => l,
             // Only dials this device made are worth an error screen.
             Err(_) if direction == Direction::Inbound => return,
-            Err(e) => return self.fail(dial_failed(&e), RETRY_AFTER),
+            Err(e) => return self.unreachable(dial_failed(&e), RETRY_AFTER),
         };
         let peer_fp = link.peer_fingerprint();
         if let Err(unexpected) = check_expected(expect, &peer_fp, &self.shared.pins()) {
@@ -192,9 +214,9 @@ impl<P: Platform + Clone + Sync> Dial<P> {
         let s = match establish(link, |fp| pins.contains(fp), &me, side, shared.admit.as_deref()).await {
             Ok(s) => s,
             Err(DaemonError::Session(SessionError::TimedOut)) => {
-                return self.fail_none("The other computer didn't answer in time.".into(), RETRY_AFTER);
+                return self.unreachable_none("The other computer didn't answer in time.".into());
             }
-            Err(DaemonError::Session(SessionError::Net(e))) => return self.fail_none(dial_failed(&e), RETRY_AFTER),
+            Err(DaemonError::Session(SessionError::Net(e))) => return self.unreachable_none(dial_failed(&e)),
             // The embedder's hook turned the peer away: say why, whoever dialed.
             Err(DaemonError::Refused(why)) => {
                 shared.notify(turned_away(why).to_owned());
@@ -225,11 +247,19 @@ impl<P: Platform + Clone + Sync> Dial<P> {
         None
     }
 
+    /// [`Dial::unreachable`] after [`RETRY_AFTER`], for a caller that returns `None`.
+    fn unreachable_none<T>(&self, msg: String) -> Option<T> {
+        self.unreachable(msg, RETRY_AFTER);
+        None
+    }
+
     /// Publishes the connected session, runs it until the peer is lost, then publishes how it ended.
     async fn serve(&self, s: Session, peer_fp: &Fingerprint) {
         let (shared, generation) = (&self.shared, self.generation);
         // The name the peer gave over the authenticated link is the one to keep.
         shared.learn_name(s.peer, &s.peer_name);
+        // Connected again: a later failure under a VPN is news again.
+        shared.vpn_warned.store(false, Ordering::SeqCst);
         *shared.closer.relock() = Some(s.tx.closer());
         // Remember which side the peer's screen is on, for automatic reconnects.
         let x = |p: PeerId| s.desk.screens.iter().find(|d| d.peer == p).map(|d| d.x);
