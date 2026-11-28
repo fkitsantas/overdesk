@@ -443,3 +443,40 @@ async fn an_admit_hook_that_refuses_closes_the_link_with_its_reason() {
         "the typed reason"
     );
 }
+
+#[tokio::test]
+async fn the_escape_chord_closes_a_link_whose_peer_stopped_reading() {
+    let (mut a, _b_never_reads) = pair_sessions().await;
+    // Fill the control stream's flow-control window so the next write cannot leave. Each
+    // write is abandoned at its timeout, mid-frame, like the one `run` is about to drop.
+    let big = Control::Clipboard {
+        text: "x".repeat(1024 * 1024 - 64),
+    };
+    for _ in 0..8 {
+        let _ = tokio::time::timeout(Duration::from_millis(200), a.tx.send_control(&big)).await;
+    }
+    let fake = Recording::default();
+    let (local, capture) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(run(a, capture, fake.clone(), |_| {}));
+    // Cross the right edge: the `Focus` message cannot leave, so the send stalls.
+    local
+        .send(Captured::Moved {
+            dx: 5,
+            dy: 0,
+            x: 1439,
+            y: 450,
+        })
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!task.is_finished(), "the stalled send is still pending");
+    let start = std::time::Instant::now();
+    local.send(Captured::Escape).unwrap();
+    // Far below the five second send ceiling.
+    let ended = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("the session ends at once")
+        .unwrap();
+    assert_eq!(ended, overdeskd::Ended::Lost);
+    assert!(start.elapsed() < Duration::from_secs(2));
+    assert!(!*fake.swallowing.lock().unwrap(), "input is handed back");
+}

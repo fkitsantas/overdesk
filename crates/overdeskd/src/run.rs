@@ -2,11 +2,12 @@
 //! Running a session: the loop that feeds local input, the peer's messages and the clipboard to
 //! the Desk engine and carries out what it decides.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use overdesk_core::engine::{Action, Event, Mode};
-use overdesk_net::transport::{LinkRx, LinkTx, MotionRx, NetError};
+use overdesk_core::engine::{Action, Engine, Event, Mode};
+use overdesk_net::transport::{CloseReason, Closer, LinkRx, LinkTx, MotionRx, NetError};
 use overdesk_platform::input::Captured;
 use overdesk_proto::{Control, PeerId};
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, channel};
@@ -118,19 +119,68 @@ async fn next_local(local: &mut UnboundedReceiver<Captured>, carry: &mut Option<
     Some(c)
 }
 
-/// Performs the engine's `actions` in order. A failed send does not stop the rest: the Swallow
-/// and Inject actions still to run are what hand input back to this device. Returns whether
-/// the link is down.
-async fn perform<P: Platform + Sync>(actions: &mut Vec<Action>, tx: &mut LinkTx, platform: &P) -> bool {
+/// What [`perform`] needs to keep the engine fed while a control send is stalled.
+struct Feed<'a> {
+    /// The engine, which local input reaches while the send waits.
+    engine: &'a mut Engine,
+    /// Where local input comes from.
+    sources: &'a mut Sources,
+    /// Closes the link from outside `tx`, which a pending send borrows.
+    closer: &'a Closer,
+    /// Start of the session, for the engine's clock.
+    epoch: Instant,
+    /// Hears every cursor-mode change.
+    on_mode: &'a mut (dyn FnMut(Mode) + Send),
+    /// Where the engine's actions land before they join the queue.
+    scratch: &'a mut Vec<Action>,
+}
+
+/// Performs the engine's `actions` in order, and the ones local input makes while a send waits.
+/// A failed send does not stop the rest: the Swallow and Inject actions still to run are what
+/// hand input back to this device. Returns whether the link is down.
+///
+/// A control send may take up to [`SEND_TIMEOUT`] against a peer that stopped reading. Local
+/// input is still handled meanwhile (the queue grows by what the engine makes of it), and when
+/// the engine leaves `Driving` (the escape chord, the cursor back across the edge) the link is
+/// closed at once: this device must not wait for a dead peer to hand input back. Dropping the
+/// pending write leaves the stream mid-frame, so that link is closed and never used again.
+async fn perform<P: Platform + Sync>(
+    actions: &mut VecDeque<Action>,
+    tx: &mut LinkTx,
+    platform: &P,
+    feed: &mut Feed<'_>,
+) -> bool {
     let mut link_down = false;
-    for action in actions.drain(..) {
+    while let Some(action) = actions.pop_front() {
         match action {
             // shortcut: one peer per session (Free tier: 2 devices); route by `to` for Pro.
             Action::Send { msg, .. } => {
+                let send = tx.send_control_timeout(&msg, SEND_TIMEOUT);
+                tokio::pin!(send);
+                let sent = loop {
+                    tokio::select! {
+                        biased;
+                        r = &mut send => break r,
+                        event = feed.sources.local_event() => {
+                            let before = feed.engine.mode();
+                            let now = feed.epoch.elapsed().as_millis() as u64;
+                            feed.scratch.clear();
+                            feed.engine.handle_into(event, now, feed.scratch);
+                            actions.extend(feed.scratch.drain(..));
+                            let after = feed.engine.mode();
+                            if after != before {
+                                (feed.on_mode)(after);
+                                if matches!(before, Mode::Driving(_)) {
+                                    // The write is dropped with `send`; the stream is now garbage.
+                                    feed.closer.close(CloseReason::Other);
+                                    break Err(NetError::Closed("send abandoned".into()));
+                                }
+                            }
+                        }
+                    }
+                };
                 // A peer that stops reading must not freeze the loop: a stalled send closes the link.
-                if let Err(NetError::Closed(_) | NetError::PeerLeft | NetError::Forgotten) =
-                    tx.send_control_timeout(&msg, SEND_TIMEOUT).await
-                {
+                if let Err(NetError::Closed(_) | NetError::PeerLeft | NetError::Forgotten) = sent {
                     link_down = true;
                 }
             }
@@ -199,6 +249,21 @@ struct Sources {
 }
 
 impl Sources {
+    /// The next local event, for a caller waiting on something else too. Cancel-safe.
+    async fn local_event(&mut self) -> Event {
+        loop {
+            if !self.local_open {
+                return std::future::pending().await;
+            }
+            match next_local(&mut self.local, &mut self.carry).await {
+                // Trackpad gestures are Pro-only: Free never forwards them.
+                Some(Captured::Gesture { .. }) => {}
+                Some(c) => return to_event(c),
+                None => self.local_open = false,
+            }
+        }
+    }
+
     /// Waits for the next thing to act on. Local input comes first: it is the latency-critical
     /// path and the engine decides the rest.
     async fn next(&mut self, clip: &mut ClipboardPump) -> Step {
@@ -271,16 +336,30 @@ pub async fn run_with(
     let mut clip = ClipboardPump::start(platform.clone()).await;
     let epoch = Instant::now();
     let debug = std::env::var_os("OVERDESK_DEBUG").is_some();
-    let mut actions: Vec<Action> = Vec::new();
+    let mut actions: VecDeque<Action> = VecDeque::new();
+    let mut scratch: Vec<Action> = Vec::new();
+    let closer = tx.closer();
     loop {
         let event = match sources.next(&mut clip).await {
             Step::Event(event) => event,
             Step::Reading(now) => {
                 if let Some(text) = clip.on_reading(now, &mut on_notice) {
+                    actions.push_back(Action::Send {
+                        to: peer,
+                        msg: Control::Clipboard { text },
+                    });
                     // A failed send means the link is going down; the reader reports the loss.
-                    let _ = tx
-                        .send_control_timeout(&Control::Clipboard { text }, SEND_TIMEOUT)
-                        .await;
+                    let mut feed = Feed {
+                        engine: &mut engine,
+                        sources: &mut sources,
+                        closer: &closer,
+                        epoch,
+                        on_mode: &mut on_mode,
+                        scratch: &mut scratch,
+                    };
+                    if perform(&mut actions, &mut tx, &*platform, &mut feed).await {
+                        break;
+                    }
                 }
                 continue;
             }
@@ -295,18 +374,27 @@ pub async fn run_with(
         let lost = event == Event::PeerLost(peer);
         trace(debug, || format!("{:?} <- {:?}", engine.mode(), redact_event(&event)));
         let before = engine.mode();
-        actions.clear();
-        engine.handle_into(event, epoch.elapsed().as_millis() as u64, &mut actions);
+        scratch.clear();
+        engine.handle_into(event, epoch.elapsed().as_millis() as u64, &mut scratch);
         if engine.mode() != before {
             on_mode(engine.mode());
         }
-        if !actions.is_empty() {
+        if !scratch.is_empty() {
             trace(debug, || {
-                format!("  -> {:?}", actions.iter().map(redact_action).collect::<Vec<_>>())
+                format!("  -> {:?}", scratch.iter().map(redact_action).collect::<Vec<_>>())
             });
         }
+        actions.extend(scratch.drain(..));
         // A failed send ends the session after the local actions finish.
-        let link_down = perform(&mut actions, &mut tx, &*platform).await;
+        let mut feed = Feed {
+            engine: &mut engine,
+            sources: &mut sources,
+            closer: &closer,
+            epoch,
+            on_mode: &mut on_mode,
+            scratch: &mut scratch,
+        };
+        let link_down = perform(&mut actions, &mut tx, &*platform, &mut feed).await;
         if lost || link_down {
             break;
         }

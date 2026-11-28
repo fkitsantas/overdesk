@@ -29,6 +29,12 @@ impl Closer {
         self.0.close(0u32.into(), LEAVE_REASON);
     }
 
+    /// Closes the connection with `reason`, which the peer sees as [`NetError::Refused`]. For a
+    /// link that must not be used again, such as one whose control write was cancelled mid-frame.
+    pub fn close(&self, reason: CloseReason) {
+        self.0.close(0u32.into(), reason.code());
+    }
+
     /// Closes the connection with the "forgotten" reason: this device has unpaired the peer,
     /// which sees [`NetError::Forgotten`] and may unpair this device in turn.
     pub fn forget(&self) {
