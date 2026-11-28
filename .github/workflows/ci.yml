@@ -51,7 +51,8 @@ jobs:
 
   # A code and security review of every pull request into main by Claude (anthropics/claude-code-action), with inline
   # comments, and an issue for anything serious enough to track. Uses the maintainer's Claude subscription
-  # (secret CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`); skipped while that secret is not set. The action only runs
+  # (secret CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`) and this workflow's own GitHub token, so nothing on
+  # GitHub is paid for; skipped while that secret is not set. The action only runs
   # for authors with write access and skips pull requests from forks, so an outside pull request never steers a run that
   # holds the token.
   review:
@@ -62,7 +63,7 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
-      id-token: write
+      actions: read
     env:
       HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
     steps:
@@ -78,6 +79,8 @@ jobs:
         if: env.HAS_TOKEN == 'true'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The workflow's own token, so no Claude GitHub app is needed (comments come from github-actions[bot]).
+          github_token: ${{ github.token }}
           track_progress: true
           prompt: |
             REPO: ${{ github.repository }}
