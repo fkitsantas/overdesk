@@ -108,14 +108,103 @@ fn tunnel_name(name: &str) -> bool {
     TUNNEL_PREFIXES.iter().any(|p| n.starts_with(p)) || ["vpn", "wireguard", "anyconnect"].iter().any(|k| n.contains(k))
 }
 
+/// Windows `IfType` of a PPP adapter (dial-up and many VPN clients).
+#[cfg(any(windows, test))]
+const IF_TYPE_PPP: u32 = 23;
+/// Windows `IfType` of a proprietary virtual adapter.
+#[cfg(any(windows, test))]
+const IF_TYPE_PROP_VIRTUAL: u32 = 53;
+/// Windows `IfType` of a tunnel adapter.
+#[cfg(any(windows, test))]
+const IF_TYPE_TUNNEL: u32 = 131;
+
+/// Whether a Windows adapter of `if_type` and `description` is a VPN tunnel: a PPP, tunnel or
+/// virtual type, or a description naming a known VPN client or driver.
+#[cfg(any(windows, test))]
+fn tunnel_adapter(if_type: u32, description: &str) -> bool {
+    const KEYWORDS: [&str; 12] = [
+        "wireguard",
+        "wintun",
+        "tap-windows",
+        "openvpn",
+        "anyconnect",
+        "globalprotect",
+        "pangp",
+        "fortinet",
+        "nordlynx",
+        "tailscale",
+        "zerotier",
+        "vpn",
+    ];
+    let d = description.to_ascii_lowercase();
+    matches!(if_type, IF_TYPE_PPP | IF_TYPE_PROP_VIRTUAL | IF_TYPE_TUNNEL) || KEYWORDS.iter().any(|k| d.contains(k))
+}
+
+/// Whether the Windows adapter with interface `index` is a tunnel by its type or description,
+/// which the user cannot rename the way the friendly name can be; `false` if it cannot be read.
+#[cfg(windows)]
+#[allow(unsafe_code)] // one IP Helper call and a walk of the list it fills; invariants stated below
+fn windows_tunnel(index: u32) -> bool {
+    use windows_sys::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_SUCCESS};
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, GAA_FLAG_SKIP_UNICAST,
+        GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
+    };
+    use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
+    let flags = GAA_FLAG_SKIP_UNICAST | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    let mut bytes: u32 = 16 * 1024;
+    // The list can grow between the size query and the fill, so ask again a few times.
+    for _ in 0..4 {
+        // u64 units: the buffer holds structs that need 8-byte alignment.
+        let mut buf = vec![0u64; (bytes as usize).div_ceil(8)];
+        let head = buf.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+        // SAFETY: `head` points at `bytes` writable bytes, which `bytes` states; no reserved argument is used.
+        let rc = unsafe { GetAdaptersAddresses(u32::from(AF_UNSPEC), flags, std::ptr::null(), head, &mut bytes) };
+        if rc == ERROR_BUFFER_OVERFLOW {
+            continue; // `bytes` now holds the size needed
+        }
+        if rc != ERROR_SUCCESS {
+            return false;
+        }
+        let mut next = head.cast_const();
+        while !next.is_null() {
+            // SAFETY: on success the buffer holds a valid list: each `Next` is null or points inside it,
+            // and each `Description` is a NUL-terminated UTF-16 string inside it.
+            let a = unsafe { &*next };
+            let ids = [unsafe { a.Anonymous1.Anonymous.IfIndex }, a.Ipv6IfIndex];
+            if ids.contains(&index) {
+                let mut len = 0;
+                // SAFETY: as above; the string ends at its NUL.
+                while !a.Description.is_null() && unsafe { *a.Description.add(len) } != 0 {
+                    len += 1;
+                }
+                let text = if a.Description.is_null() {
+                    String::new()
+                } else {
+                    // SAFETY: `len` units were just read from this string.
+                    String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(a.Description, len) })
+                };
+                return tunnel_adapter(a.IfType, &text);
+            }
+            next = a.Next.cast_const();
+        }
+        return false;
+    }
+    false
+}
+
 /// Whether `i` is a tunnel: the OS says point-to-point (macOS/Linux flag, Windows PPP and tunnel
-/// types), else by name.
+/// types), else by name, and on Windows by the adapter's type and description too.
 ///
-/// shortcut: Windows WireGuard, Tailscale and OpenVPN adapters are plain Ethernet-type to the OS and
-/// if-addrs exposes only the user-renamable friendly name, so a renamed one is missed (the
-/// same-subnet rule in [`on_our_lan`] still avoids dialing it); upgrade by reading the adapter
-/// description through the Windows IP Helper API.
+/// shortcut: on Windows each interface asks the IP Helper API afresh (a few milliseconds, only
+/// when interfaces are listed); upgrade to a cache if profiling shows it. Linux and macOS have
+/// only the name and the point-to-point flag, so a renamed WireGuard or Tailscale interface
+/// there is missed (the same-subnet rule in [`on_our_lan`] still avoids dialing it).
 fn is_tunnel(i: &if_addrs::Interface) -> bool {
+    #[cfg(windows)]
+    if i.index.is_some_and(windows_tunnel) {
+        return true;
+    }
     i.is_p2p() || tunnel_name(&i.name)
 }
 
@@ -154,17 +243,22 @@ fn same_subnet(a: IpAddr, (b, prefix): Subnet) -> bool {
     width == other && !is_link_local(&a) && (x ^ y).checked_shr(u32::from(width - prefix)).unwrap_or(0) == 0
 }
 
+/// Whether `a` is a global unicast IPv6 address (2000::/3): not link-local, ULA or loopback.
+fn is_global_v6(a: &std::net::Ipv6Addr) -> bool {
+    a.segments()[0] & 0xe000 == 0x2000
+}
+
 /// Whether an interface with these properties is a live VPN: a tunnel that is up and holds a
-/// routable-looking IPv4 address. Why IPv4: macOS always has idle utun0..utun7 with only fe80
-/// addresses, and a real VPN tunnel gets an IPv4 (only the VPN's utun8 had `10.1.0.4` here).
-///
-/// shortcut: IPv6-only VPNs are missed, upgrade when one is reported.
+/// routable-looking IPv4 address or a global IPv6 one (an IPv6-only VPN). Why not link-local or
+/// ULA: macOS always has idle utun0..utun7 with only fe80 addresses, and a real VPN tunnel gets
+/// an IPv4 (only the VPN's utun8 had `10.1.0.4` here).
 fn is_vpn(tunnel: bool, up: bool, addrs: &[IpAddr]) -> bool {
     tunnel
         && up
-        && addrs
-            .iter()
-            .any(|a| a.is_ipv4() && !a.is_loopback() && !is_link_local(a))
+        && addrs.iter().any(|a| match a {
+            IpAddr::V4(v) => !v.is_loopback() && !v.is_link_local(),
+            IpAddr::V6(v) => is_global_v6(v),
+        })
 }
 
 /// Whether a VPN tunnel is up on this computer now; `false` when the interfaces cannot be read.
@@ -599,6 +693,11 @@ mod tests {
         assert!(!is_vpn(true, true, &[ll6, ll4]), "idle utun");
         assert!(!is_vpn(true, true, &[IpAddr::V4(Ipv4Addr::LOCALHOST)]));
         assert!(!is_vpn(true, true, &[]));
+        let global = IpAddr::V6("2001:db8::5".parse().unwrap());
+        assert!(is_vpn(true, true, &[ll6, global]), "an IPv6-only VPN");
+        assert!(!is_vpn(true, true, &[IpAddr::V6("fd00::5".parse().unwrap())]), "ULA");
+        assert!(!is_vpn(true, true, &[IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)]));
+        assert!(!is_vpn(true, false, &[global]), "down");
         assert!(!is_vpn(true, false, &[v4]), "down");
         assert!(!is_vpn(false, true, &[v4]), "not a tunnel");
     }
@@ -633,6 +732,34 @@ mod tests {
             "en0", "eth0", "wlan0", "wlp3s0", "Ethernet", "Wi-Fi", "bridge0", "docker0",
         ] {
             assert!(!tunnel_name(l), "{l}");
+        }
+    }
+
+    #[test]
+    fn windows_adapters_are_tunnels_by_type_or_description() {
+        for (t, d) in [
+            (IF_TYPE_PPP, "RAS Async Adapter"),
+            (IF_TYPE_TUNNEL, "Teredo Tunneling Pseudo-Interface"),
+            (IF_TYPE_PROP_VIRTUAL, "Anything"),
+            (6, "WireGuard Tunnel"),
+            (6, "Wintun Userspace Tunnel"),
+            (6, "TAP-Windows Adapter V9"),
+            (6, "OpenVPN Data Channel Offload"),
+            (6, "Cisco AnyConnect Secure Mobility Client Virtual Miniport Adapter"),
+            (6, "PANGP Virtual Ethernet Adapter Secure"),
+            (6, "Fortinet Virtual Ethernet Adapter (NDIS 6.30)"),
+            (6, "NordLynx Tunnel"),
+            (6, "Tailscale Tunnel"),
+            (6, "ZeroTier Virtual Port"),
+            (6, "Acme VPN Client"),
+        ] {
+            assert!(tunnel_adapter(t, d), "{t} {d}");
+        }
+        for (t, d) in [
+            (6, "Intel(R) Ethernet Connection I219-V"),
+            (71, "Intel(R) Wi-Fi 6 AX201 160MHz"),
+        ] {
+            assert!(!tunnel_adapter(t, d), "{t} {d}");
         }
     }
 

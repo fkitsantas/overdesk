@@ -163,19 +163,23 @@ pub(super) fn reveal(file: &std::path::Path) -> std::io::Result<()> {
     use std::process::Command;
     #[cfg(target_os = "macos")]
     return Command::new("open").arg("-R").arg(file).spawn().map(drop);
-    // The path quoted on its own: std would quote `/select,<path>` as one word, which Explorer misreads.
+    // Raw, since std would quote `/select,<path>` as one word, which Explorer misreads.
     #[cfg(windows)]
-    return std::os::windows::process::CommandExt::raw_arg(
-        &mut Command::new("explorer"),
-        format!("/select,\"{}\"", file.display()),
-    )
-    .spawn()
-    .map(drop);
+    return std::os::windows::process::CommandExt::raw_arg(&mut Command::new("explorer"), select_arg(file))
+        .spawn()
+        .map(drop);
     #[cfg(not(any(target_os = "macos", windows)))]
     Command::new("xdg-open")
         .arg(file.parent().unwrap_or(file))
         .spawn()
         .map(drop)
+}
+
+/// Explorer's argument that selects `file`: `/select,` then the path in quotes on its own, so spaces
+/// and commas stay in the path, with `\` separators (Explorer ignores the request given `/`).
+#[cfg(any(windows, test))]
+fn select_arg(file: &std::path::Path) -> String {
+    format!("/select,\"{}\"", file.display().to_string().replace('/', "\\"))
 }
 
 /// Starts a fresh process, since permissions take effect for a new process only. Inside a
@@ -202,6 +206,7 @@ pub fn relaunch() -> ! {
             None => std::process::Command::new(exe).spawn(),
         };
     }
+    overdesk_proto::log::flush(); // a pending "repeated N times" is not lost at exit
     std::process::exit(0);
 }
 
@@ -260,5 +265,16 @@ mod tests {
             "the port in use is named: {}",
             texts[0]
         );
+    }
+
+    #[test]
+    fn explorer_gets_the_path_quoted_on_its_own_with_backslashes() {
+        let arg = |p: &str| select_arg(std::path::Path::new(p));
+        assert_eq!(
+            arg(r"C:\Users\Ada B\Downloads\d.txt"),
+            r#"/select,"C:\Users\Ada B\Downloads\d.txt""#
+        );
+        assert_eq!(arg(r"D:\A, B\x,y.txt"), r#"/select,"D:\A, B\x,y.txt""#);
+        assert_eq!(arg("C:/Users/Ada/d.txt"), r#"/select,"C:\Users\Ada\d.txt""#);
     }
 }

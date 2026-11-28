@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use overdesk_net::discovery::{Change, Nearby};
 use overdesk_net::pairing::{Fingerprint, peer_id};
-use overdesk_proto::PeerId;
 use overdesk_proto::log::{self, short_id};
+use overdesk_proto::{Os, PeerId};
 use tokio::time::Instant;
 
 use super::model::{DeviceKind, NearbyDevice, PairedDevice};
@@ -37,40 +37,50 @@ pub fn auto_target(
 /// Folds one network change into the devices heard so far: a device is kept by id, so
 /// re-announcing replaces it, and `Lost` removes it. The address is only a hint, since
 /// anyone can announce any id; it is verified against the pin when connecting.
-pub fn apply(found: &mut BTreeMap<PeerId, Nearby>, change: Change) {
+///
+/// Returns the device that was known at another address and has just announced a new one: a
+/// failed dial to the old address says nothing about the new, so the caller drops its backoff.
+pub fn apply(found: &mut BTreeMap<PeerId, Nearby>, change: Change) -> Option<PeerId> {
     match change {
         Change::Found(n) => {
             // A re-announcement of the same device at the same place is not news.
             let line = format!("nearby found: {} {} at {}", short_id(&n.id), n.os.id(), n.address);
             let (id, address) = (n.id, n.address);
-            if found.insert(id, n).is_none_or(|old| old.address != address) {
+            let old = found.insert(id, n);
+            if old.as_ref().is_none_or(|old| old.address != address) {
                 log::info(line);
             }
+            old.is_some_and(|old| old.address != address).then_some(id)
         }
         Change::Lost(id) => {
             if found.remove(&id).is_some() {
                 log::info(format_args!("nearby lost: {}", short_id(&id)));
             }
+            None
         }
         // Not about a device; the controller reacts to it by redialing.
-        Change::NetworkChanged => {}
+        Change::NetworkChanged => None,
     }
 }
 
 /// Like [`apply`], but a device that is not paired is ignored once [`MAX_UNPAIRED_NEARBY`]
 /// others are remembered, so announcements from a hostile network cannot grow the list without
-/// bound. Paired devices are always kept.
-pub(super) fn apply_capped(found: &mut BTreeMap<PeerId, Nearby>, change: Change, pins: &BTreeSet<Fingerprint>) {
+/// bound. Paired devices are always kept. Returns what [`apply`] does.
+pub(super) fn apply_capped(
+    found: &mut BTreeMap<PeerId, Nearby>,
+    change: Change,
+    pins: &BTreeSet<Fingerprint>,
+) -> Option<PeerId> {
     if let Change::Found(n) = &change
         && !found.contains_key(&n.id)
     {
         let paired: BTreeSet<PeerId> = pins.iter().map(peer_id).collect();
         let unpaired = found.keys().filter(|id| !paired.contains(id)).count();
         if unpaired >= MAX_UNPAIRED_NEARBY && !paired.contains(&n.id) {
-            return;
+            return None;
         }
     }
-    apply(found, change);
+    apply(found, change)
 }
 
 /// The list the UI shows: sorted by name, each device marked paired when a pinned
@@ -108,11 +118,13 @@ pub(super) fn remember_names(names: &mut BTreeMap<PeerId, String>, nearby: &[Nea
 }
 
 /// The paired computers, sorted by name: each is named from `names`, else by
-/// the start of its id, and is online when `nearby` lists it.
+/// the start of its id, is online when `nearby` lists it, and has the OS in `oses` (learned from
+/// its authenticated `Hello`), else the one it announced.
 pub fn paired_list(
     pins: &BTreeSet<Fingerprint>,
     nearby: &[NearbyDevice],
     names: &BTreeMap<PeerId, String>,
+    oses: &BTreeMap<PeerId, Os>,
 ) -> Vec<PairedDevice> {
     let ids: BTreeSet<PeerId> = pins.iter().map(peer_id).collect();
     let mut list: Vec<_> = ids
@@ -122,6 +134,10 @@ pub fn paired_list(
             name: names.get(&id).cloned().unwrap_or_else(|| id.to_hex()[..8].to_owned()),
             kind: DeviceKind::Computer,
             online: nearby.iter().any(|d| d.id == id),
+            os: oses
+                .get(&id)
+                .copied()
+                .or_else(|| nearby.iter().find(|d| d.id == id).map(|d| d.os)),
         })
         .collect();
     list.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
@@ -131,7 +147,6 @@ pub fn paired_list(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use overdesk_proto::Os;
     use std::net::SocketAddr;
     use std::time::Duration;
 
@@ -268,6 +283,40 @@ mod tests {
             .map(|d| d.name)
             .collect();
         assert_eq!(names, ["Alpha", "Zed renamed"]);
+    }
+
+    #[test]
+    fn a_new_address_for_a_known_device_is_reported_and_nothing_else_is() {
+        let mut found = BTreeMap::new();
+        let id = PeerId([1; 16]);
+        assert_eq!(apply(&mut found, Change::Found(seen(1, "A"))), None, "first sighting");
+        assert_eq!(apply(&mut found, Change::Found(seen(1, "A"))), None, "same address");
+        let mut moved = seen(1, "A");
+        moved.address = SocketAddr::from(([10, 0, 1, 1], 24801));
+        assert_eq!(apply(&mut found, Change::Found(moved)), Some(id));
+        assert_eq!(apply(&mut found, Change::Lost(id)), None);
+        assert_eq!(apply(&mut found, Change::NetworkChanged), None);
+    }
+
+    #[test]
+    fn a_paired_device_has_the_saved_os_while_away_and_the_saved_one_wins_when_near() {
+        let mut fp = [0u8; 32];
+        fp[..16].fill(1);
+        let pins = BTreeSet::from([fp]);
+        let (id, oses) = (PeerId([1; 16]), BTreeMap::from([(PeerId([1; 16]), Os::Linux)]));
+        let away = paired_list(&pins, &[], &BTreeMap::new(), &oses);
+        assert_eq!((away[0].online, away[0].os), (false, Some(Os::Linux)));
+        let near = [dev(1, true)]; // announces Windows
+        assert_eq!(
+            paired_list(&pins, &near, &BTreeMap::new(), &oses)[0].os,
+            Some(Os::Linux)
+        );
+        assert_eq!(
+            paired_list(&pins, &near, &BTreeMap::new(), &BTreeMap::new())[0].os,
+            Some(Os::Windows)
+        );
+        assert_eq!(paired_list(&pins, &[], &BTreeMap::new(), &BTreeMap::new())[0].os, None);
+        assert_eq!(away[0].id, id);
     }
 
     #[test]

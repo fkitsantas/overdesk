@@ -43,13 +43,13 @@ pub(crate) fn facts(state: Option<&AppState>, edition: EditionReport) -> Facts {
             peers: Vec::new(),
         };
     };
-    // A paired device's OS is known while it is nearby or connected.
+    // A paired device's OS: live while connected, else as saved from its last session or announced.
     let os_of = |id| {
         let live = match &state.phase {
             Phase::Connected { peers, .. } => peers.iter().find(|p| p.id == id).map(|p| p.os),
             _ => None,
         };
-        live.or_else(|| state.nearby.iter().find(|n| n.id == id).map(|n| n.os))
+        live.or_else(|| state.paired.iter().find(|p| p.id == id).and_then(|p| p.os))
             .map(overdesk_proto::Os::id)
     };
     let connection = match &state.phase {
@@ -260,9 +260,15 @@ fn edition_id(e: &EditionReport) -> &'static str {
     if e.pro { "pro" } else { "free" }
 }
 
-/// The Downloads folder, if this computer has one already: the desktop's own answer first
-/// (`xdg-user-dir` on Linux and the BSDs, where it is a config entry, not a variable).
+/// The Downloads folder, if this computer has one already: the system's own answer first
+/// (the known folder on Windows; `xdg-user-dir` on Linux and the BSDs, where it is a config
+/// entry, not a variable), then the environment.
 fn downloads() -> Option<PathBuf> {
+    // Windows' own answer first: the folder can be moved off `%USERPROFILE%\Downloads`.
+    #[cfg(windows)]
+    if let Some(known) = overdesk_platform::downloads_dir().filter(|d| d.is_dir()) {
+        return Some(known);
+    }
     #[cfg(free_unix)]
     let asked = std::process::Command::new("xdg-user-dir")
         .arg("DOWNLOAD")
@@ -482,6 +488,7 @@ mod tests {
                 name: "Ada's private laptop".into(),
                 kind: DeviceKind::Computer,
                 online: true,
+                os: Some(Os::Windows),
             }],
             nearby: vec![NearbyDevice {
                 kind: DeviceKind::Computer,
@@ -498,6 +505,21 @@ mod tests {
         assert!(text.contains("paired: abababab windows online"), "{text}");
         assert!(text.contains("connection: pairing"));
         assert_eq!(f.peers, ["windows"]);
+        // A paired computer that is away still reports the OS saved from its last session.
+        let away = AppState {
+            paired: vec![PairedDevice {
+                id,
+                name: "Ada's private laptop".into(),
+                kind: DeviceKind::Computer,
+                online: false,
+                os: Some(Os::Linux),
+            }],
+            nearby: vec![],
+            ..state.clone()
+        };
+        let f = facts(Some(&away), report(&[]));
+        assert!(f.lines.join("\n").contains("paired: abababab linux offline"));
+        assert_eq!(f.peers, ["linux"]);
         for secret in ["123456", "Ada"] {
             assert!(!text.contains(secret), "{secret} in {text}");
         }

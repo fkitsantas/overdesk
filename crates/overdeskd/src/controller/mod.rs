@@ -30,8 +30,7 @@ use tokio::time::Instant;
 use crate::Platform;
 use crate::task::AbortOnDrop;
 use dial::{Auto, Dial};
-use nearby::apply_capped;
-use persist::{load_names, load_side};
+use persist::{load_names, load_oses, load_side};
 use shared::Shared;
 use trust::{Direction, PairingWindow, PinBook};
 
@@ -78,6 +77,7 @@ pub async fn spawn<P: Platform + Clone + Sync>(
         network: Notify::new(),
         book: PinBook::new(config.store_dir.clone(), Arc::new(store)),
         names: Mutex::new(load_names(&config.store_dir)),
+        oses: Mutex::new(load_oses(&config.store_dir)),
         window: PairingWindow::default(),
         generation: AtomicU64::new(0),
         save_warned: AtomicBool::new(false),
@@ -109,9 +109,7 @@ pub async fn spawn<P: Platform + Clone + Sync>(
                     // Gone from the network: a later reappearance is a fresh start.
                     shared.left.relock().remove(id);
                 }
-                let pins = shared.pins();
-                apply_capped(&mut shared.found.relock(), change, &pins);
-                shared.refresh_nearby();
+                shared.hear(change);
             }
         });
         Ok((advertiser, browser))
@@ -491,6 +489,7 @@ mod tests {
             state,
             book: PinBook::new(dir.clone(), Arc::new(store)),
             names: Mutex::new(BTreeMap::new()),
+            oses: Mutex::new(BTreeMap::new()),
             dir,
             closer: Mutex::new(None),
             left: Mutex::new(BTreeSet::new()),
@@ -591,6 +590,36 @@ mod tests {
             aimed: None,
         };
         (sup, rx)
+    }
+
+    #[tokio::test]
+    async fn a_new_announced_address_ends_that_peers_backoff_only() {
+        let (sup, _rx) = backing_off("moved", Phase::Idle);
+        let shared = &sup.shared;
+        let other = PeerId([8; 16]);
+        shared
+            .retry_after
+            .relock()
+            .insert(other, Instant::now() + Duration::from_secs(3600));
+        let announce = |id: PeerId, port: u16| {
+            Change::Found(overdesk_net::discovery::Nearby {
+                id,
+                name: "peer".into(),
+                os: Os::Linux,
+                address: SocketAddr::from(([127, 0, 0, 1], port)),
+                pro: false,
+            })
+        };
+        shared.hear(announce(OTHER, 9));
+        shared.hear(announce(OTHER, 9));
+        assert!(
+            shared.retry_after.relock().contains_key(&OTHER),
+            "same address: still backing off"
+        );
+        shared.hear(announce(OTHER, 10));
+        let retry = shared.retry_after.relock();
+        assert!(!retry.contains_key(&OTHER), "moved: dial the new address at once");
+        assert!(retry.contains_key(&other), "another peer's backoff is untouched");
     }
 
     #[tokio::test]

@@ -7,19 +7,19 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use overdesk_core::engine::Mode;
-use overdesk_net::discovery::Nearby;
+use overdesk_net::discovery::{Change, Nearby};
 use overdesk_net::pairing::Fingerprint;
 use overdesk_net::session::Me;
 use overdesk_net::sync::Relock;
 use overdesk_net::transport::{Closer, NetError};
-use overdesk_proto::PeerId;
 use overdesk_proto::log;
+use overdesk_proto::{Os, PeerId};
 use tokio::sync::{Notify, watch};
 use tokio::time::Instant;
 
 use super::model::{AppState, Phase, ScreenView};
-use super::nearby::{nearby_list, paired_list, remember_names};
-use super::persist::{forget_name, learn_name, save_names};
+use super::nearby::{apply_capped, nearby_list, paired_list, remember_names};
+use super::persist::{forget_name, forget_os, learn_name, learn_os, save_names};
 use super::trust::{PairingWindow, PinBook};
 use crate::Admit;
 
@@ -43,6 +43,9 @@ pub(super) struct Shared<P> {
     /// The name of each paired device, kept in [`NAMES_FILE`](super::persist::NAMES_FILE) so it survives a restart. The name
     /// from an authenticated `Hello` always wins; one heard on the network only fills a gap.
     pub(super) names: Mutex<BTreeMap<PeerId, String>>,
+    /// The OS of each paired device as it said over an authenticated `Hello`, kept in
+    /// [`OSES_FILE`](super::persist::OSES_FILE), so a device that is away still has one.
+    pub(super) oses: Mutex<BTreeMap<PeerId, Os>>,
     /// When unknown devices may pair, and the answer to the code on screen.
     pub(super) window: PairingWindow,
     /// Which session may write state. Bumped on Disconnect and whenever a session starts,
@@ -98,6 +101,29 @@ impl<P> Shared<P> {
         }
     }
 
+    /// Remembers `os` for `id` as heard from the peer itself over its authenticated link, and
+    /// keeps it across restarts.
+    pub(super) fn learn_os(&self, id: PeerId, os: Os) {
+        let learned = learn_os(&self.dir, &mut self.oses.relock(), id, os);
+        // An OS that could not be saved is still known for this run.
+        let changed = learned.as_ref().map_or(true, |changed| *changed);
+        self.saved(learned.map(drop));
+        if changed {
+            self.refresh_nearby();
+        }
+    }
+
+    /// Folds in one change heard on the network and republishes the lists. A paired device that
+    /// announces a new address loses its backoff, so the new address is tried at once.
+    pub(super) fn hear(&self, change: Change) {
+        let pins = self.pins();
+        let moved = apply_capped(&mut self.found.relock(), change, &pins);
+        if let Some(id) = moved {
+            self.retry_after.relock().remove(&id);
+        }
+        self.refresh_nearby();
+    }
+
     /// Reports a failed save of a small file (a name, a side) to the log, and to the user once per
     /// run: what is lost is only remembered across a restart.
     pub(super) fn saved(&self, result: Result<(), NetError>) {
@@ -111,13 +137,14 @@ impl<P> Shared<P> {
         }
     }
 
-    /// Unpairs `peer`: deletes its pin and name, and makes every session that is still setting
+    /// Unpairs `peer`: deletes its pin, name and OS, and makes every session that is still setting
     /// up with it stale, so it cannot finish connecting with the old trust.
     pub(super) fn unpair(&self, peer: PeerId) {
         self.book.revoke();
         self.book
             .unpin_peer(peer, |e| self.notify(format!("Couldn't forget that computer: {e}")));
         self.saved(forget_name(&self.dir, &mut self.names.relock(), peer));
+        self.saved(forget_os(&self.dir, &mut self.oses.relock(), peer));
         self.refresh_nearby();
     }
 
@@ -139,7 +166,7 @@ impl<P> Shared<P> {
             if remember_names(&mut names, &list) {
                 self.saved(save_names(&self.dir, &names));
             }
-            paired_list(&pins, &list, &names)
+            paired_list(&pins, &list, &names, &self.oses.relock())
         };
         self.state.send_if_modified(|s| {
             let changed = s.nearby != list || s.paired != paired;

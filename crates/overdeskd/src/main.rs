@@ -256,6 +256,7 @@ async fn main() -> ExitCode {
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
             println!("--exit-after {secs}s reached; exiting.");
+            log::flush(); // a pending "repeated N times" is not lost at exit
             std::process::exit(0);
         });
     }
@@ -271,13 +272,15 @@ async fn main() -> ExitCode {
     } else {
         start_native(args).await
     };
-    match result {
+    let code = match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             log::warn(&e);
             ExitCode::FAILURE
         }
-    }
+    };
+    log::flush(); // a pending "repeated N times" is not lost at exit
+    code
 }
 
 /// Starts the real input adapter and serves with this device's display size.

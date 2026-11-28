@@ -5,6 +5,7 @@
 //! only the thin FFI layers are `cfg`-gated.
 
 #![cfg_attr(test, allow(clippy::missing_docs_in_private_items))] // test names document themselves
+mod folders;
 pub mod input;
 pub mod linux;
 pub mod mac;
@@ -12,6 +13,7 @@ pub mod text;
 mod version;
 pub mod win;
 
+pub use folders::downloads_dir;
 pub use version::os_version;
 
 /// A running clipboard-change watcher; dropping it stops the watcher thread.

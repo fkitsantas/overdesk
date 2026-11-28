@@ -679,6 +679,7 @@ mod tests {
                 name: "PC".into(),
                 kind: DeviceKind::Computer,
                 online: true,
+                os: None,
             }],
             ..AppState::new("Mac".into(), Os::MacOs)
         };

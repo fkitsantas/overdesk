@@ -83,6 +83,13 @@ impl Os {
             Os::Android => "android",
         }
     }
+
+    /// Inverse of [`Os::id`]; `None` for anything else.
+    pub fn from_id(id: &str) -> Option<Self> {
+        [Os::MacOs, Os::Windows, Os::Linux, Os::Android]
+            .into_iter()
+            .find(|os| os.id() == id)
+    }
 }
 
 /// Pointer button, independent of how the local OS numbers its buttons.

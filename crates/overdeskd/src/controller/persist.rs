@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! The small files in the store folder: which side each peer's screen is on, and each paired
-//! computer's name.
+//! computer's name and OS.
 
 use std::collections::BTreeMap;
 
-use overdesk_proto::PeerId;
+use overdesk_proto::{Os, PeerId};
 
 use overdesk_net::session::sanitize_name;
 use overdesk_net::transport::NetError;
@@ -15,6 +15,10 @@ use super::Side;
 pub(super) const SIDES_FILE: &str = "sides.txt";
 /// The file in the store folder that remembers each paired computer's name (hex id, tab, name).
 pub(super) const NAMES_FILE: &str = "names.txt";
+
+/// The file in the store folder that remembers each paired computer's OS (hex id, tab, OS id), as
+/// learned from its authenticated `Hello`. Older stores lack it, which only means no OS is known.
+pub(super) const OSES_FILE: &str = "oses.txt";
 
 /// The saved side of `peer`'s screen, `Right` if none was saved or the file is unreadable.
 pub(super) fn load_side(dir: &std::path::Path, peer: &PeerId) -> Side {
@@ -122,6 +126,54 @@ pub fn forget_name(dir: &std::path::Path, names: &mut BTreeMap<PeerId, String>, 
     Ok(())
 }
 
+/// Reads `oses.txt` text: one `hex-id<TAB>os-id` per line; malformed lines are skipped.
+pub(super) fn parse_oses(text: &str) -> BTreeMap<PeerId, Os> {
+    text.lines()
+        .filter_map(|l| {
+            let (id, os) = l.split_once('\t')?;
+            Some((PeerId::from_hex(id)?, Os::from_id(os.trim())?))
+        })
+        .collect()
+}
+
+/// The text of `oses.txt` for `oses`.
+pub(super) fn render_oses(oses: &BTreeMap<PeerId, Os>) -> String {
+    oses.iter()
+        .map(|(id, os)| format!("{}\t{}\n", id.to_hex(), os.id()))
+        .collect()
+}
+
+/// The saved OSes, empty if the file is missing or unreadable.
+pub fn load_oses(dir: &std::path::Path) -> BTreeMap<PeerId, Os> {
+    parse_oses(&std::fs::read_to_string(dir.join(OSES_FILE)).unwrap_or_default())
+}
+
+/// Remembers `os` for `id` in `oses` and in `oses.txt` as heard from the peer itself over its
+/// authenticated link. `Ok(true)` if that changed anything.
+///
+/// # Errors
+///
+/// [`NetError::Io`] if the change could not be saved; `oses` has it all the same.
+pub fn learn_os(dir: &std::path::Path, oses: &mut BTreeMap<PeerId, Os>, id: PeerId, os: Os) -> Result<bool, NetError> {
+    let changed = oses.insert(id, os) != Some(os);
+    if changed {
+        write_atomic(&dir.join(OSES_FILE), &render_oses(oses))?;
+    }
+    Ok(changed)
+}
+
+/// Forgets the OS of `id` in `oses` and in `oses.txt`.
+///
+/// # Errors
+///
+/// [`NetError::Io`] if the change could not be saved; `oses` has forgotten it all the same.
+pub fn forget_os(dir: &std::path::Path, oses: &mut BTreeMap<PeerId, Os>, id: PeerId) -> Result<(), NetError> {
+    if oses.remove(&id).is_some() {
+        write_atomic(&dir.join(OSES_FILE), &render_oses(oses))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,6 +216,30 @@ mod tests {
         assert_eq!(load_names(&dir), BTreeMap::from([(id, "Desk".to_owned())]));
         forget_name(&dir, &mut names, id).unwrap();
         assert!(load_names(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn oses_round_trip_skip_junk_and_are_learned_and_forgotten() {
+        let (a, b) = (PeerId([1; 16]), PeerId([2; 16]));
+        let oses = BTreeMap::from([(a, Os::Windows), (b, Os::MacOs)]);
+        assert_eq!(parse_oses(&render_oses(&oses)), oses);
+        let text = format!("zz\twindows\n{}\tbeos\nno tab\n{}\tlinux\n", a.to_hex(), b.to_hex());
+        assert_eq!(parse_oses(&text), BTreeMap::from([(b, Os::Linux)]));
+        assert!(parse_oses("").is_empty(), "an older store has no file");
+
+        let dir = std::env::temp_dir().join(format!("overdesk-oses-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut known = BTreeMap::new();
+        assert!(learn_os(&dir, &mut known, a, Os::Windows).unwrap());
+        assert!(!learn_os(&dir, &mut known, a, Os::Windows).unwrap(), "unchanged");
+        assert!(
+            learn_os(&dir, &mut known, a, Os::Linux).unwrap(),
+            "the peer's word replaces"
+        );
+        assert_eq!(load_oses(&dir), BTreeMap::from([(a, Os::Linux)]));
+        forget_os(&dir, &mut known, a).unwrap();
+        assert!(load_oses(&dir).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -155,6 +155,9 @@ pub struct PairedDevice {
     pub kind: DeviceKind,
     /// Whether it is in the nearby list now.
     pub online: bool,
+    /// Its OS, as it said over an authenticated link (kept across restarts, so known while it is
+    /// away), else as it announced on the network; `None` if neither has been heard.
+    pub os: Option<Os>,
 }
 
 /// Everything the UI shows, published by the controller after every change.

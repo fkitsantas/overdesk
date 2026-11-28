@@ -8,5 +8,7 @@ fn main() -> iced::Result {
     if let Some(w) = overdesk_platform::win::ffi::ensure_dpi_aware() {
         overdesk_proto::log::warn(w);
     }
-    overdesk_app::run(|config, platform| Box::pin(overdeskd::controller::spawn(config, platform)))
+    let result = overdesk_app::run(|config, platform| Box::pin(overdeskd::controller::spawn(config, platform)));
+    overdesk_proto::log::flush(); // a pending "repeated N times" is not lost at exit
+    result
 }

@@ -273,6 +273,7 @@ impl<P: Platform + Clone + Sync> Dial<P> {
         let (shared, generation) = (&self.shared, self.generation);
         // The name the peer gave over the authenticated link is the one to keep.
         shared.learn_name(s.peer, &s.peer_name);
+        shared.learn_os(s.peer, s.peer_os);
         // Connected again: a later failure under a VPN is news again.
         shared.vpn_warned.store(false, Ordering::SeqCst);
         *shared.closer.relock() = Some(s.tx.closer());
