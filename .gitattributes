@@ -1,0 +1,4 @@
+# GitHub's language bar counts the app, not its build tooling: the packaging recipes (the OpenBSD crate list
+# crates.inc is otherwise taken for SourcePawn) and the check, cross-build and packaging scripts are left out.
+packaging/** linguist-vendored
+scripts/** linguist-vendored
