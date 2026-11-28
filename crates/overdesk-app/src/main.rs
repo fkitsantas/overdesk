@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! The Free app: the library's window around the open controller.
+// A release build is a windowed app on Windows (no console window); a debug build keeps the
+// console for stderr. Messages go to the log file either way.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 fn main() -> iced::Result {
     overdesk_proto::log::init(&overdeskd::store_dir());
