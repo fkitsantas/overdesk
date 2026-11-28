@@ -2,8 +2,9 @@
 //! Platform-neutral captured input, shared by every OS adapter and the engine.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc::Receiver;
+use std::sync::{Arc, PoisonError, RwLock};
 
 pub use overdesk_proto::Rect;
 use overdesk_proto::{Button, Gesture, Phase, ScrollUnit};
@@ -116,6 +117,72 @@ pub fn box_relative(rects: &[Rect]) -> Vec<Rect> {
 /// Global OS coordinates to box-relative ones (`origin` is the box's top-left).
 pub fn to_local(global: i32, origin: i32) -> i32 {
     global.saturating_sub(origin)
+}
+
+/// Smallest [`move_matters`] margin, in pixels.
+const MIN_MARGIN: i32 = 8;
+
+/// Largest [`MoveFilter`] margin. One huge jump (a warp, a remote-desktop client) must not
+/// make the filter forward every move for the rest of the session; a clamped OS cursor lands on
+/// the edge itself, so a bigger margin buys nothing.
+const MAX_MARGIN: i32 = 128;
+
+/// Whether a plain local move that left the cursor at `(x, y)` (box-relative, like `monitors`)
+/// can matter to the engine while no peer is driven: false only when the point is at least
+/// `margin` pixels inside some monitor on every side. Moves the engine must see are those near
+/// or past a monitor edge, because only a push off an edge can hand the cursor to a peer. It is
+/// decided by where the move ended, so a flick from the middle that crosses an edge in one event
+/// still counts: its point is on the edge or beyond it. A seam between two monitors counts as an
+/// edge, which is more than needed and always safe. No monitors: everything matters.
+pub fn move_matters(monitors: &[Rect], margin: i32, x: i32, y: i32) -> bool {
+    let margin = i64::from(margin.max(0));
+    let (x, y) = (i64::from(x), i64::from(y));
+    !monitors.iter().any(|m| {
+        x - i64::from(m.x) >= margin
+            && m.right() - 1 - x >= margin
+            && y - i64::from(m.y) >= margin
+            && m.bottom() - 1 - y >= margin
+    })
+}
+
+/// Lets a capture backend skip plain moves the engine cannot use, which are almost all of them
+/// while the cursor stays on this device: the daemon publishes the monitors while the engine is
+/// in `Local` mode, and nothing otherwise (every move is forwarded). Backends ask
+/// [`MoveFilter::wants`] for each move; one that does not can leave sending everything.
+///
+/// Shared by an `Arc` between the daemon (one writer, rarely) and the capture thread (one
+/// reader, per event); the reader takes a read lock only while a set is published.
+#[derive(Debug, Default)]
+pub struct MoveFilter {
+    /// Whether a set is published; false forwards every move without taking the lock.
+    active: AtomicBool,
+    /// The published monitors, valid while `active`.
+    monitors: RwLock<Vec<Rect>>,
+    /// The largest per-event delta seen since the set was published, which sizes the margin.
+    seen: AtomicI32,
+}
+
+impl MoveFilter {
+    /// Publishes `monitors` (box-relative, as the engine has them), or `None` to forward every move.
+    pub fn set(&self, monitors: Option<&[Rect]>) {
+        let mut held = self.monitors.write().unwrap_or_else(PoisonError::into_inner);
+        held.clear();
+        held.extend_from_slice(monitors.unwrap_or_default());
+        self.seen.store(0, Ordering::Relaxed);
+        self.active
+            .store(monitors.is_some_and(|m| !m.is_empty()), Ordering::Release);
+    }
+
+    /// Whether the move by `(dx, dy)` to `(x, y)` must be forwarded. Always while `swallowing`.
+    pub fn wants(&self, dx: i32, dy: i32, x: i32, y: i32, swallowing: bool) -> bool {
+        if swallowing || !self.active.load(Ordering::Acquire) {
+            return true;
+        }
+        let step = dx.unsigned_abs().max(dy.unsigned_abs()).min(MAX_MARGIN as u32) as i32;
+        let margin = self.seen.fetch_max(step, Ordering::Relaxed).max(step).max(MIN_MARGIN);
+        let monitors = self.monitors.read().unwrap_or_else(PoisonError::into_inner);
+        move_matters(&monitors, margin, x, y)
+    }
 }
 
 /// Physical input seen on this device, in Overdesk terms.
@@ -235,6 +302,8 @@ pub struct Sink {
     deliver: Arc<dyn Fn(Captured) -> Result<(), Captured> + Send + Sync>,
     /// Where the backend reports what it copes with.
     warnings: Warnings,
+    /// Which plain moves the consumer can do without.
+    moves: Arc<MoveFilter>,
 }
 
 impl Sink {
@@ -244,7 +313,20 @@ impl Sink {
         Self {
             deliver: Arc::new(deliver),
             warnings: Warnings::default(),
+            moves: Arc::default(),
         }
+    }
+
+    /// This sink, with the consumer's [`MoveFilter`]: its backend skips the moves the filter does not want.
+    #[must_use]
+    pub fn with_move_filter(mut self, moves: Arc<MoveFilter>) -> Self {
+        self.moves = moves;
+        self
+    }
+
+    /// Whether a move must be sent; see [`MoveFilter::wants`]. Without a filter, always.
+    pub fn wants_move(&self, dx: i32, dy: i32, x: i32, y: i32, swallowing: bool) -> bool {
+        self.moves.wants(dx, dy, x, y, swallowing)
     }
 
     /// This sink, with the backend's warnings going to `warnings`.
@@ -452,6 +534,64 @@ mod tests {
 
     fn rect(x: i32, y: i32, w: u32, h: u32) -> Rect {
         Rect { x, y, w, h }
+    }
+
+    #[test]
+    fn a_move_deep_inside_a_monitor_does_not_matter_but_edges_and_beyond_do() {
+        let one = [rect(0, 0, 1000, 800)];
+        assert!(!move_matters(&one, 8, 500, 400));
+        assert!(!move_matters(&one, 8, 8, 8), "exactly the margin in is still inside");
+        assert!(!move_matters(&one, 8, 991, 791));
+        assert!(move_matters(&one, 8, 7, 400), "within the margin of the left edge");
+        assert!(move_matters(&one, 8, 500, 792), "within the margin of the bottom edge");
+        assert!(move_matters(&one, 8, 999, 400), "on the right edge");
+        // A flick from the middle across the edge in one event ends at or past it.
+        assert!(move_matters(&one, 8, 1200, 400));
+        assert!(move_matters(&one, 8, -300, 400));
+        assert!(move_matters(&[], 8, 500, 400), "no monitors: everything matters");
+    }
+
+    #[test]
+    fn a_seam_between_monitors_and_a_hole_edge_count_as_edges() {
+        // Two side by side, and a third lower down that leaves a hole under the first.
+        let m = [
+            rect(0, 0, 1000, 800),
+            rect(1000, 0, 1000, 800),
+            rect(1000, 800, 1000, 400),
+        ];
+        assert!(move_matters(&m, 8, 997, 400), "the seam, left side");
+        assert!(move_matters(&m, 8, 1003, 400), "the seam, right side");
+        assert!(move_matters(&m, 8, 500, 795), "above the hole");
+        assert!(!move_matters(&m, 8, 1500, 1000), "inside the third");
+        assert!(move_matters(&m, 8, 500, 1000), "inside the hole itself");
+    }
+
+    #[test]
+    fn the_filter_forwards_everything_until_a_set_is_published_and_while_swallowing() {
+        let f = MoveFilter::default();
+        assert!(f.wants(1, 0, 500, 400, false), "nothing published");
+        f.set(Some(&[rect(0, 0, 1000, 800)]));
+        assert!(!f.wants(1, 0, 500, 400, false));
+        assert!(f.wants(1, 0, 500, 400, true), "swallowing forwards all");
+        assert!(f.wants(1, 0, 3, 400, false));
+        f.set(None);
+        assert!(f.wants(1, 0, 500, 400, false), "withdrawn");
+        f.set(Some(&[]));
+        assert!(f.wants(1, 0, 500, 400, false), "an empty set is no set");
+    }
+
+    #[test]
+    fn the_margin_grows_with_the_largest_step_seen_and_is_capped() {
+        let f = MoveFilter::default();
+        f.set(Some(&[rect(0, 0, 1000, 800)]));
+        assert!(!f.wants(1, 0, 20, 400, false), "20 px in, margin 8");
+        assert!(!f.wants(30, 0, 500, 400, false));
+        assert!(f.wants(1, 0, 20, 400, false), "a 30 px step was seen: margin 30");
+        f.wants(100_000, 0, 500, 400, false);
+        assert!(f.wants(1, 0, 127, 400, false), "capped at 128, not 100000");
+        assert!(!f.wants(1, 0, 129, 400, false));
+        f.set(Some(&[rect(0, 0, 1000, 800)]));
+        assert!(!f.wants(1, 0, 20, 400, false), "republishing forgets the steps");
     }
 
     #[test]

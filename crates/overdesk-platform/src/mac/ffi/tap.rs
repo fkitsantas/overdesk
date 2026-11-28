@@ -412,12 +412,11 @@ fn translate(ty: CGEventType, ev: &CGEvent, ctx: &TapCtx) -> Option<(Held, bool)
                 let Rect { x: ox, y: oy, .. } = desktop_bounds();
                 let origin = (ox, oy);
                 let at = CGEvent::location(Some(ev));
-                send(Captured::Moved {
-                    dx,
-                    dy,
-                    x: to_local(at.x as i32, origin.0),
-                    y: to_local(at.y as i32, origin.1),
-                });
+                let (x, y) = (to_local(at.x as i32, origin.0), to_local(at.y as i32, origin.1));
+                // Far from every edge the engine has no use for a move: skip the send.
+                if ctx.tx.wants_move(dx, dy, x, y, ctx.swallow.load(Ordering::Relaxed)) {
+                    send(Captured::Moved { dx, dy, x, y });
+                }
             }
             None
         }

@@ -29,6 +29,8 @@ pub struct Recording {
     pub swallowing: Arc<Mutex<bool>>,
     /// The clipboard's text: written by the session, and by a test to "copy" something.
     pub clipboard: Arc<Mutex<Option<String>>>,
+    /// The monitors last published through [`Platform::set_move_filter`]; `None` while withdrawn.
+    pub move_filter: Arc<Mutex<Option<Vec<overdesk_core::Rect>>>>,
 }
 
 impl Clipboard for Recording {
@@ -46,5 +48,8 @@ impl Platform for Recording {
     }
     fn inject(&self, action: Action) {
         self.log.lock().unwrap().push(action);
+    }
+    fn set_move_filter(&self, monitors: Option<&[overdesk_core::Rect]>) {
+        *self.move_filter.lock().unwrap() = monitors.map(<[_]>::to_vec);
     }
 }

@@ -313,6 +313,13 @@ impl Engine {
         Ok(out)
     }
 
+    /// This device's monitors as the engine uses them: rectangles local to its screen, the whole
+    /// screen until [`Engine::set_monitors`] says otherwise. They change with `set_desk` when it
+    /// resizes this device's screen.
+    pub fn monitors(&self) -> &[Rect] {
+        &self.monitors
+    }
+
     /// Current handoff role.
     pub fn mode(&self) -> Mode {
         self.mode

@@ -38,6 +38,7 @@ struct Cleanup<P: Platform + Sync>(Arc<P>);
 
 impl<P: Platform + Sync> Drop for Cleanup<P> {
     fn drop(&mut self) {
+        self.0.set_move_filter(None);
         self.0.swallow(false);
         self.0.inject(Action::ReleaseAll);
     }
@@ -305,7 +306,7 @@ pub async fn run_with(
     session: Session,
     local: UnboundedReceiver<Captured>,
     platform: impl Platform + Sync,
-    mut on_mode: impl FnMut(Mode) + Send,
+    mut hear_mode: impl FnMut(Mode) + Send,
     mut on_notice: impl FnMut(String) + Send,
 ) -> Ended {
     let Session {
@@ -318,6 +319,18 @@ pub async fn run_with(
     let platform = Arc::new(platform);
     let _cleanup = Cleanup(platform.clone());
     engine.set_monitors(platform.monitors());
+    platform.set_move_filter(Some(engine.monitors()));
+    // Plain moves matter to the engine only while it is `Local` (see `Platform::set_move_filter`);
+    // in `Driven` a local move is the takeover, and `Driving` swallows. So every mode change
+    // withdraws or restores the filter, here and in `perform`, before anything else hears of it.
+    let monitors = engine.monitors().to_vec();
+    let mut on_mode = {
+        let platform = platform.clone();
+        move |mode: Mode| {
+            platform.set_move_filter(matches!(mode, Mode::Local).then_some(&monitors[..]));
+            hear_mode(mode);
+        }
+    };
     // Control messages are read by their own task and queue here; local input and motion
     // datagrams are cancel-safe and are awaited by the loop directly, with no task or channel
     // hop between them and the engine.

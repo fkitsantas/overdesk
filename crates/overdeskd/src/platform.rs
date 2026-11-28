@@ -73,6 +73,12 @@ pub trait Platform: Clipboard {
     fn display_size(&self) -> Option<(u32, u32)> {
         None
     }
+    /// Tells the capture side which plain local moves the engine can do without. `Some(monitors)`
+    /// (the engine's own, box-relative) is published while no peer is driven or driving: a move
+    /// that ends deep inside a monitor cannot hand the cursor to a peer, so it need not be sent.
+    /// `None` withdraws it: every move is sent. Called at the start of a session, on every cursor
+    /// mode change and when the session ends. The default does nothing (everything is sent).
+    fn set_move_filter(&self, _monitors: Option<&[Rect]>) {}
     /// Local input for the next session. Platforms without capture (tests, headless)
     /// return a stream that ends immediately.
     fn capture(&self) -> UnboundedReceiver<Captured> {

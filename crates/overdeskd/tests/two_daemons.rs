@@ -480,3 +480,28 @@ async fn the_escape_chord_closes_a_link_whose_peer_stopped_reading() {
     assert!(start.elapsed() < Duration::from_secs(2));
     assert!(!*fake.swallowing.lock().unwrap(), "input is handed back");
 }
+
+#[tokio::test]
+async fn plain_moves_are_filtered_only_while_the_engine_is_local() {
+    let (a, _b) = pair_sessions().await;
+    let fake = Recording::default();
+    let (local, capture) = tokio::sync::mpsc::unbounded_channel();
+    let _task = tokio::spawn(run(a, capture, fake.clone(), |_| {}));
+    let filter = fake.move_filter.clone();
+    wait_for("the filter at the start", || filter.lock().unwrap().is_some()).await;
+    // Across the edge: driving the peer, every move must be sent.
+    local
+        .send(Captured::Moved {
+            dx: 5,
+            dy: 0,
+            x: 1439,
+            y: 450,
+        })
+        .unwrap();
+    wait_for("the filter withdrawn while driving", || {
+        filter.lock().unwrap().is_none()
+    })
+    .await;
+    local.send(Captured::Escape).unwrap();
+    wait_for("the filter back in Local", || filter.lock().unwrap().is_some()).await;
+}

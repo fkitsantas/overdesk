@@ -381,7 +381,10 @@ unsafe fn raw_input_message(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                         let dt_ms = now.duration_since(ctx.last_move).as_secs_f64() * 1000.0;
                         ctx.last_move = now;
                         let (dx, dy) = ctx.ballistics.apply(dx, dy, dt_ms);
-                        send(ctx, Captured::Moved { dx, dy, x, y });
+                        // Far from every edge the engine has no use for a move: skip the send.
+                        if ctx.tx.wants_move(dx, dy, x, y, ctx.swallow.load(Ordering::Relaxed)) {
+                            send(ctx, Captured::Moved { dx, dy, x, y });
+                        }
                     }
                 });
             }

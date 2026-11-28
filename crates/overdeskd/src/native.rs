@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use overdesk_core::Rect;
 use overdesk_core::engine::Action;
 use overdesk_net::sync::Relock;
-use overdesk_platform::input::{Captured, Sink, Warnings};
+use overdesk_platform::input::{Captured, MoveFilter, Sink, Warnings};
 #[cfg(free_unix)]
 pub use overdesk_platform::linux::ffi::{
     Capture, Injector, main_display_size, monitors, permissions, request_permissions,
@@ -84,6 +84,8 @@ pub struct NativePlatform {
     inject: Sender<Action>,
     /// The session that currently receives captured input.
     slot: Slot,
+    /// Which plain moves the capture thread may skip; see [`Platform::set_move_filter`].
+    moves: Arc<MoveFilter>,
     /// Modifier and dead-key state of the character lookup, shared by every clone.
     typist: Arc<Mutex<Typist<NativeLayout>>>,
 }
@@ -111,13 +113,15 @@ impl NativePlatform {
         // The capture thread hands each event straight to the current session's queue (a
         // tokio sender's `send` is sync and works from any thread): no bridge thread. With no
         // session, input is dropped. Always `Ok`: a session ending must not stop capture.
+        let moves = Arc::new(MoveFilter::default());
         let sink = Sink::new(move |c| {
             if let Some(tx) = current.relock().as_ref() {
                 let _ = tx.send(c);
             }
             Ok(())
         })
-        .with_warnings(warnings());
+        .with_warnings(warnings())
+        .with_move_filter(moves.clone());
         let capture = Capture::start_with(sink).map_err(|e| {
             if denied(&e) {
                 StartError::PermissionDenied
@@ -177,6 +181,7 @@ impl NativePlatform {
             capture: Arc::new(capture),
             inject,
             slot,
+            moves,
             typist: Arc::new(Mutex::new(Typist::new(NativeLayout::default()))),
         })
     }
@@ -256,6 +261,10 @@ impl Platform for NativePlatform {
 
     fn monitors(&self) -> Vec<Rect> {
         monitors()
+    }
+
+    fn set_move_filter(&self, monitors: Option<&[Rect]>) {
+        self.moves.set(monitors);
     }
 
     fn capture(&self) -> UnboundedReceiver<Captured> {
