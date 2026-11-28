@@ -132,7 +132,11 @@ pub fn state(which: &str) -> (AppState, Option<(bool, bool)>) {
 pub fn edition(which: &str) -> Option<crate::Edition> {
     matches!(which, "licence" | "licence-error" | "licensed").then(|| crate::Edition {
         licensed_to: (which == "licensed").then(|| "ada@example.org".into()),
-        activate: |_| Err("That key isn't valid. Check it and try again.".into()),
+        activate: || crate::ActivationStart {
+            url: "https://overdesk.org/activate".into(),
+            code: "AB12-CD34".into(),
+            done: Box::pin(std::future::pending()),
+        },
         report: crate::free_report,
     })
 }

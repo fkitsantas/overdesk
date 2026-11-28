@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! What the user has typed into the window's fields: the address to dial and the licence key.
+//! The window's own form state: the address to dial, and Activate Pro while it waits for the browser.
 
 use std::net::{IpAddr, SocketAddr};
 
+use iced::Task;
 use overdeskd::Side;
 
-use super::Edition;
 use super::sys::{lan_ip, parse_address};
+use super::{Edition, Message};
 
 /// The "Enter an address instead" fallback and the choice of side that goes with every connect.
 pub(super) struct AddressForm {
@@ -48,21 +49,41 @@ impl AddressForm {
 /// The licence row of the official build.
 #[derive(Default)]
 pub(super) struct Activation {
-    /// The licence key being typed.
-    pub(super) key: String,
+    /// While waiting for the browser: the code the page shows, and the handle that stops the wait.
+    pub(super) waiting: Option<(String, iced::task::Handle)>,
     /// Why the last activation failed, until the next attempt.
     pub(super) error: Option<String>,
-    /// The licence email, once a key was activated in this run (applies after a restart).
+    /// The licence email, once Pro was activated in this run (applies after a restart).
     pub(super) activated: Option<String>,
 }
 
 impl Activation {
-    /// Checks the typed key with `edition`.
-    pub(super) fn activate(&mut self, edition: &Edition) {
-        match (edition.activate)(self.key.trim()) {
+    /// Starts Activate Pro with `edition`: opens the browser page and waits for the licence.
+    pub(super) fn start(&mut self, edition: &Edition) -> Task<Message> {
+        self.cancel();
+        self.error = None;
+        let started = (edition.activate)();
+        if super::sys::open(&started.url).is_err() {
+            self.error = Some(format!("Couldn't open the browser. Open {} to activate.", started.url));
+        }
+        let (task, handle) = Task::perform(started.done, Message::Activated).abortable();
+        self.waiting = Some((started.code, handle.abort_on_drop()));
+        task
+    }
+
+    /// Stops waiting (the browser page, if approved later, is simply never collected).
+    pub(super) fn cancel(&mut self) {
+        if let Some((_, handle)) = self.waiting.take() {
+            handle.abort();
+        }
+    }
+
+    /// The wait ended with the licensed email or why not.
+    pub(super) fn finish(&mut self, result: Result<String, String>) {
+        self.waiting = None;
+        match result {
             Ok(email) => {
                 self.activated = Some(email);
-                self.key.clear();
                 self.error = None;
             }
             Err(e) => self.error = Some(e),
@@ -75,20 +96,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_good_key_clears_the_field_and_a_bad_one_keeps_it_with_the_reason() {
-        let edition = |activate: fn(&str) -> Result<String, String>| Edition {
-            licensed_to: None,
-            activate,
-            report: crate::free_report,
-        };
-        let mut form = Activation {
-            key: " k ".into(),
-            ..Activation::default()
-        };
-        form.activate(&edition(|k| Err(format!("no {k}"))));
-        assert_eq!((form.key.as_str(), form.error.as_deref()), (" k ", Some("no k")));
-        form.activate(&edition(|k| Ok(format!("{k}@example.org"))));
+    fn a_finished_activation_keeps_the_email_and_a_failed_one_the_reason() {
+        let mut form = Activation::default();
+        form.finish(Err("no Pro".into()));
+        assert_eq!(
+            (form.activated.as_deref(), form.error.as_deref()),
+            (None, Some("no Pro"))
+        );
+        form.finish(Ok("k@example.org".into()));
         assert_eq!(form.activated.as_deref(), Some("k@example.org"));
-        assert!(form.key.is_empty() && form.error.is_none());
+        assert!(form.error.is_none() && form.waiting.is_none());
     }
 }

@@ -592,10 +592,23 @@ impl App {
         section.into()
     }
 
-    /// The "Overdesk Pro" row: the licensee, a restart prompt after activating, or a key field.
+    /// The "Overdesk Pro" row: the licensee, a restart prompt after activating, the wait for the
+    /// browser, or the Activate Pro button.
     fn licence_view<'a>(&'a self, edition: &'a Edition) -> Element<'a, Message> {
-        if let Some(email) = &edition.licensed_to {
-            return text(format!("Pro, licensed to {email}")).size(13).style(muted).into();
+        if let (Some(email), None, None) = (&edition.licensed_to, &self.licence.activated, &self.licence.waiting) {
+            // Activate again: a computer removed from the licence, or a switch to another account.
+            let again = row![
+                text(format!("Pro, licensed to {email}")).size(13).style(muted),
+                small("Activate again")
+                    .style(style::secondary)
+                    .on_press(Message::Activate),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center);
+            return match &self.licence.error {
+                Some(e) => column![again, text(e.as_str()).size(13).style(muted)].spacing(4).into(),
+                None => again.into(),
+            };
         }
         if let Some(email) = &self.licence.activated {
             return row![
@@ -608,26 +621,28 @@ impl App {
             .align_y(Alignment::Center)
             .into();
         }
-        let go = small("Activate").style(style::secondary);
-        let go = if self.licence.key.trim().is_empty() {
-            go
-        } else {
-            go.on_press(Message::Activate)
-        };
-        let mut licence = column![
-            row![
-                text_input("Licence key", &self.licence.key)
-                    .on_input(Message::Key)
-                    .on_submit(Message::Activate)
-                    .size(13)
-                    .padding(8)
-                    .style(style::field),
-                go
+        let mut licence = column![].spacing(4);
+        licence = licence.push(match &self.licence.waiting {
+            Some((code, _)) => Element::from(
+                row![
+                    text(format!("Finish in your browser: sign in and type the code {code}"))
+                        .size(13)
+                        .style(muted),
+                    small("Cancel")
+                        .style(style::secondary)
+                        .on_press(Message::CancelActivate),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+            ),
+            None => row![
+                small("Activate Pro").style(style::primary).on_press(Message::Activate),
+                text("Sign in with the email you bought Pro with").size(13).style(muted),
             ]
-            .spacing(8)
+            .spacing(10)
             .align_y(Alignment::Center)
-        ]
-        .spacing(4);
+            .into(),
+        });
         if let Some(e) = &self.licence.error {
             licence = licence.push(text(e.as_str()).size(13).style(muted));
         }

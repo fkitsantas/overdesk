@@ -73,10 +73,30 @@ static SPAWN: OnceLock<Spawn> = OnceLock::new();
 pub struct Edition {
     /// "Overdesk Pro" when a valid key is active, else `None` (Free): the licence email.
     pub licensed_to: Option<String>,
-    /// Checks and stores a key; `Ok(email)` on success, `Err` with a sentence for the user.
-    pub activate: fn(&str) -> Result<String, String>,
+    /// Starts "Activate Pro": the page to open in the browser, the code it shows, and the wait
+    /// for the licence (`Ok(email)` once it is stored, `Err` with a sentence for the user).
+    pub activate: fn() -> ActivationStart,
     /// Describes the edition for diagnostics, given how many computers are linked now.
     pub report: fn(usize) -> EditionReport,
+}
+
+/// An "Activate Pro" that has started: the browser page where the user signs in and approves
+/// this computer, the short code both screens show, and the wait for the licence to arrive.
+pub struct ActivationStart {
+    /// The overdesk.org page to open.
+    pub url: String,
+    /// The code the page also shows ("AB12-CD34"), so the user can tell it is this request.
+    pub code: String,
+    /// Resolves with the licensed email once the licence is stored, or why it was not.
+    pub done: Pin<Box<dyn Future<Output = Result<String, String>> + Send>>,
+}
+
+impl std::fmt::Debug for ActivationStart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActivationStart")
+            .field("code", &self.code)
+            .finish_non_exhaustive()
+    }
 }
 
 /// What a build says about itself in a bug report: asked when the report is made, so a licence that
@@ -310,10 +330,12 @@ enum Message {
     OpenSettings(Permission),
     /// Re-check the macOS permissions while the permissions screen is shown.
     PollPermissions,
-    /// The licence key field changed.
-    Key(String),
-    /// The user asked to activate the typed key.
+    /// The user chose Activate Pro: open the browser and wait for the licence.
     Activate,
+    /// The user stopped waiting for the browser.
+    CancelActivate,
+    /// The wait for the licence ended: the licensed email, or why not.
+    Activated(Result<String, String>),
     /// Restart the app so newly granted permissions take effect.
     Relaunch,
     /// Try starting the controller again after it failed.
@@ -375,7 +397,7 @@ impl App {
             let app = Self {
                 phase: 0.3,
                 licence: Activation {
-                    error: (which == "licence-error").then(|| "That key isn't valid. Check it and try again.".into()),
+                    error: (which == "licence-error").then(|| "There is no active Pro licence on that account.".into()),
                     ..Activation::default()
                 },
                 ..Self::new(screen, preview::theme())
@@ -491,12 +513,13 @@ impl App {
                 self.answered |= matches!(c, Command::AnswerCode(_) | Command::Answer { .. });
                 self.send(c);
             }
-            Message::Key(k) => self.licence.key = k,
             Message::Activate => {
                 if let Some(edition) = EDITION.get() {
-                    self.licence.activate(edition);
+                    return self.licence.start(edition);
                 }
             }
+            Message::CancelActivate => self.licence.cancel(),
+            Message::Activated(result) => self.licence.finish(result),
             Message::OpenSettings(p) => open_settings(p),
             Message::Relaunch => relaunch(),
             #[cfg(feature = "preview")]
