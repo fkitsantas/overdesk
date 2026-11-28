@@ -12,6 +12,7 @@ use overdesk_proto::{Control, FrameError, LEN_PREFIX, MAX_FRAME_LEN, Pairing, en
 
 use super::error::{CloseReason, NetError, closed, closed_on, tls};
 use super::halves::{LinkRx, LinkTx};
+use super::node::PRE_TRUST_WINDOW;
 use crate::pairing::{Fingerprint, fingerprint};
 
 /// Largest pairing message is ~40 bytes; an unpaired peer gets no more than this.
@@ -45,6 +46,8 @@ pub struct Link {
     role: Role,
     /// Set only by a successful [`Link::trust`]; gates every control call and splitting.
     trusted: bool,
+    /// The connection receive window a trusted peer gets; an untrusted one has [`PRE_TRUST_WINDOW`].
+    trusted_window: u32,
 }
 
 impl Link {
@@ -61,6 +64,7 @@ impl Link {
         recv: RecvStream,
         local: Fingerprint,
         role: Role,
+        trusted_window: u32,
     ) -> Result<Self, NetError> {
         let certs = conn
             .peer_identity()
@@ -72,6 +76,7 @@ impl Link {
             local,
             role,
             trusted: false,
+            trusted_window,
             conn,
             send,
             recv,
@@ -107,6 +112,13 @@ impl Link {
     /// Returns [`NetError::Untrusted`] if `pinned` rejects the fingerprint.
     pub fn trust(&mut self, pinned: impl Fn(&Fingerprint) -> bool) -> Result<(), NetError> {
         self.trusted = pinned(&self.peer);
+        // Memory is committed to a peer only once it is pinned, and taken back if it is not.
+        let window = if self.trusted {
+            self.trusted_window
+        } else {
+            PRE_TRUST_WINDOW
+        };
+        self.conn.set_receive_window(window.into());
         if self.trusted { Ok(()) } else { Err(NetError::Untrusted) }
     }
 
@@ -281,6 +293,29 @@ pub(super) async fn read_frame<T: DeserializeOwned>(
 mod tests {
     use super::super::node::node;
     use super::*;
+
+    #[tokio::test]
+    async fn an_untrusted_peer_fills_only_a_small_window_and_trust_opens_it() {
+        let (_, server) = node();
+        let addr = server.local_addr().unwrap();
+        let (_, client) = node();
+        let (dialer, listener) = tokio::join!(client.connect(addr), async { server.accept().await.unwrap().await });
+        let (mut dialer, mut listener) = (dialer.unwrap(), listener.unwrap());
+        let chunk = vec![0u8; 64 * 1024];
+        let short = Duration::from_millis(300);
+        assert!(
+            tokio::time::timeout(short, dialer.send.write_all(&chunk))
+                .await
+                .is_err(),
+            "64 KiB must not fit before trust"
+        );
+        assert!(listener.trust(|_| true).is_ok());
+        tokio::time::timeout(Duration::from_secs(2), dialer.send.write_all(&chunk))
+            .await
+            .expect("room once the peer is trusted")
+            .unwrap();
+        assert!(listener.trust(|_| false).is_err());
+    }
 
     #[tokio::test]
     async fn peer_cannot_open_extra_streams() {

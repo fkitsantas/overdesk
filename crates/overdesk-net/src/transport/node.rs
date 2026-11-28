@@ -62,13 +62,26 @@ fn transport(transfers: bool) -> Arc<TransportConfig> {
     t.max_concurrent_bidi_streams(1u32.into());
     t.max_concurrent_uni_streams(u32::from(transfers).into());
     t.stream_receive_window((2 * frame).into());
-    t.receive_window(((if transfers { 4 } else { 2 }) * frame).into());
+    // Small until `Link::trust` raises it (see `PRE_TRUST_WINDOW`). The stream window cannot be
+    // raised after the handshake, so it keeps its full size; the connection window bounds both.
+    t.receive_window(PRE_TRUST_WINDOW.into());
     t.send_window(4 * frame as u64);
     // Motion datagrams are ~15 bytes; a small buffer drops stale ones under load.
     t.datagram_receive_buffer_size(Some(16 * 1024));
     // Small on purpose: a queued motion sample older than the next one is worse than none.
     t.datagram_send_buffer_size(512);
     Arc::new(t)
+}
+
+/// The connection receive window until the peer is trusted: room for pairing messages (at most
+/// 128 bytes each) and a `Hello`, nothing more, so a peer that has merely completed TLS can make
+/// us buffer a few KB, not megabytes. [`Link::trust`] raises it to [`trusted_window`].
+pub(super) const PRE_TRUST_WINDOW: u32 = 8 * 1024;
+
+/// The connection receive window of a trusted peer: two frames, four with transfers.
+pub(super) fn trusted_window(transfers: bool) -> u32 {
+    let frame = (MAX_FRAME_LEN + LEN_PREFIX) as u32;
+    (if transfers { 4 } else { 2 }) * frame
 }
 
 /// A bound QUIC endpoint that can both dial and accept.
@@ -83,6 +96,8 @@ pub struct Node {
     local: Fingerprint,
     /// Counts handshakes in flight, overall and per source IP.
     admission: Arc<Admission>,
+    /// What a link's connection window becomes once its peer is trusted.
+    trusted_window: u32,
 }
 
 /// Counts handshakes in flight so [`Node::accept`] can refuse the excess.
@@ -202,6 +217,7 @@ impl Node {
             endpoint,
             local: identity.fingerprint(),
             admission: Arc::default(),
+            trusted_window: trusted_window(transfers),
         })
     }
 
@@ -236,7 +252,7 @@ impl Node {
             let (mut send, recv) = conn.open_bi().await.map_err(closed)?;
             // Without this write the listener would never see the stream and would time out.
             send.write_all(&[STREAM_PREAMBLE]).await.map_err(closed)?;
-            Link::new(conn, send, recv, self.local, Role::Dialer)
+            Link::new(conn, send, recv, self.local, Role::Dialer, self.trusted_window)
         };
         // A peer that stalls at any step must not hang the caller; dropping closes the connection.
         tokio::time::timeout(SETUP_TIMEOUT, setup)
@@ -269,7 +285,7 @@ impl Node {
             };
             break (incoming, slot);
         };
-        let local = self.local;
+        let (local, trusted_window) = (self.local, self.trusted_window);
         Some(async move {
             let _slot = slot;
             let setup = async {
@@ -281,7 +297,7 @@ impl Node {
                     conn.close(1u32.into(), b"unknown stream format");
                     return Err(closed("unknown stream format"));
                 }
-                Link::new(conn, send, recv, local, Role::Listener)
+                Link::new(conn, send, recv, local, Role::Listener, trusted_window)
             };
             // Dropping the timed-out setup drops the connection, which closes it.
             tokio::time::timeout(SETUP_TIMEOUT, setup)
